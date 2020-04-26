@@ -8,16 +8,16 @@ uses
   HlpIHash,
   HlpKDF,
   HlpIHashInfo,
-  HlpBitConverter,
+  HlpHMACNotBuildInAdapter,
+  HlpConverters,
+  HlpArrayUtils,
   HlpHashLibTypes;
 
 resourcestring
-  SInvalidArgument =
-    '"bc (ByteCount)" Argument must be a value greater than zero.';
+  SInvalidByteCount =
+    '"(AByteCount)" Argument must be a value greater than zero.';
   SInvalidIndex = 'Invalid start or end index in the internal buffer';
-  SUninitializedInstance = '"IHash" instance is uninitialized';
-  SEmptyPassword = 'Password can''t be empty';
-  SEmptySalt = 'Salt can''t be empty';
+  SNotInitializedIHashInstance = '"IHash" instance is uninitialized';
   SIterationtooSmall = 'Iteration must be greater than zero.';
 
 type
@@ -26,11 +26,12 @@ type
     IPBKDF2_HMACNotBuildIn)
 
   strict private
+  var
     FHash: IHash;
     FHMAC: IHMAC;
-    FPassword, FSalt, Fbuffer: THashLibByteArray;
+    FPassword, FSalt, FBuffer: THashLibByteArray;
     FIterationCount, FBlock: UInt32;
-    FBlockSize, FstartIndex, FendIndex: Int32;
+    FBlockSize, FStartIndex, FEndIndex: Int32;
 
     // initializes the state of the operation.
     procedure Initialize();
@@ -41,162 +42,188 @@ type
     /// <summary>
     /// Encodes an integer into a 4-byte array, in big endian.
     /// </summary>
-    /// <param name="i">The integer to encode.</param>
+    /// <param name="AInput">The integer to encode.</param>
     /// <returns>array of bytes, in big endian.</returns>
-    class function GetBigEndianBytes(i: UInt32): THashLibByteArray;
+    class function GetBigEndianBytes(AInput: UInt32): THashLibByteArray;
       static; inline;
 
+    class procedure ValidatePBKDF2_HMACInputs(const AHash: IHash;
+      AIterations: UInt32); static;
   public
 
-    constructor Create(a_underlyingHash: IHash;
-      a_password, a_salt: THashLibByteArray; a_iterations: UInt32);
+    constructor Create(const AUnderlyingHash: IHash;
+      const APassword, ASalt: THashLibByteArray; AIterations: UInt32);
+
+    destructor Destroy; override;
+
+    procedure Clear(); override;
 
     /// <summary>
     /// Returns the pseudo-random bytes for this object.
     /// </summary>
-    /// <param name="bc">The number of pseudo-random key bytes to generate.</param>
+    /// <param name="AByteCount">The number of pseudo-random key bytes to generate.</param>
     /// <returns>A byte array filled with pseudo-random key bytes.</returns>
-    /// <exception cref="EArgumentOutOfRangeHashLibException">bc must be greater than zero.</exception>
+    /// <exception cref="EArgumentOutOfRangeHashLibException">AByteCount must be greater than zero.</exception>
     /// <exception cref="EArgumentHashLibException">invalid start index or end index of internal buffer.</exception>
-    function GetBytes(bc: Int32): THashLibByteArray; override;
+    function GetBytes(AByteCount: Int32): THashLibByteArray; override;
 
   end;
 
 implementation
 
-uses
-  HlpHashFactory; // placed here because of circular dependency.
-
 { TPBKDF2_HMACNotBuildInAdapter }
 
-constructor TPBKDF2_HMACNotBuildInAdapter.Create(a_underlyingHash: IHash;
-  a_password, a_salt: THashLibByteArray; a_iterations: UInt32);
+class procedure TPBKDF2_HMACNotBuildInAdapter.ValidatePBKDF2_HMACInputs
+  (const AHash: IHash; AIterations: UInt32);
+begin
+  if not(System.Assigned(AHash)) then
+    raise EArgumentNilHashLibException.CreateRes(@SNotInitializedIHashInstance);
+
+  if (AIterations < 1) then
+    raise EArgumentHashLibException.CreateRes(@SIterationtooSmall);
+end;
+
+procedure TPBKDF2_HMACNotBuildInAdapter.Clear();
+begin
+  TArrayUtils.ZeroFill(FPassword);
+  TArrayUtils.ZeroFill(FSalt);
+end;
+
+constructor TPBKDF2_HMACNotBuildInAdapter.Create(const AUnderlyingHash: IHash;
+  const APassword, ASalt: THashLibByteArray; AIterations: UInt32);
 begin
   Inherited Create();
-  FHash := a_underlyingHash;
-  FPassword := System.Copy(a_password);
-  FSalt := System.Copy(a_salt);
-  FIterationCount := a_iterations;
+  ValidatePBKDF2_HMACInputs(AUnderlyingHash, AIterations);
+  FHash := AUnderlyingHash;
+  FPassword := System.Copy(APassword);
+  FSalt := System.Copy(ASalt);
+  FIterationCount := AIterations;
   Initialize();
 end;
 
-class function TPBKDF2_HMACNotBuildInAdapter.GetBigEndianBytes(i: UInt32)
-  : THashLibByteArray;
-var
-  b, invertedBytes: THashLibByteArray;
+destructor TPBKDF2_HMACNotBuildInAdapter.Destroy;
 begin
-  b := TBitConverter.GetBytes(i);
-  invertedBytes := THashLibByteArray.Create(b[3], b[2], b[1], b[0]);
-  if TBitConverter.IsLittleEndian then
-    result := invertedBytes
-  else
-    result := b;
+  Clear();
+  inherited Destroy;
+end;
+
+class function TPBKDF2_HMACNotBuildInAdapter.GetBigEndianBytes(AInput: UInt32)
+  : THashLibByteArray;
+begin
+  System.SetLength(Result, System.SizeOf(UInt32));
+  TConverters.ReadUInt32AsBytesBE(AInput, Result, 0);
 end;
 
 function TPBKDF2_HMACNotBuildInAdapter.Func: THashLibByteArray;
 var
-  INT_block, temp, ret: THashLibByteArray;
-  i: UInt32;
-  j: Int32;
+  LINT_Block, LTemp: THashLibByteArray;
+  LIdx: UInt32;
+  LJdx: Int32;
 begin
 
-  INT_block := TPBKDF2_HMACNotBuildInAdapter.GetBigEndianBytes(FBlock);
+  LINT_Block := TPBKDF2_HMACNotBuildInAdapter.GetBigEndianBytes(FBlock);
   FHMAC.Initialize();
 
   FHMAC.TransformBytes(FSalt, 0, System.Length(FSalt));
-  FHMAC.TransformBytes(INT_block, 0, System.Length(INT_block));
+  FHMAC.TransformBytes(LINT_Block, 0, System.Length(LINT_Block));
 
-  temp := FHMAC.TransformFinal().GetBytes();
+  LTemp := FHMAC.TransformFinal().GetBytes();
 
-  ret := temp;
+  Result := System.Copy(LTemp);
 
-  i := 2;
-  while i <= FIterationCount do
+  LIdx := 2;
+  while LIdx <= FIterationCount do
   begin
-    temp := FHMAC.ComputeBytes(temp).GetBytes();
-    j := 0;
-    while j < FBlockSize do
+    LTemp := FHMAC.ComputeBytes(LTemp).GetBytes();
+    LJdx := 0;
+    while LJdx < FBlockSize do
     begin
-      ret[j] := ret[j] xor temp[j];
-      System.Inc(j);
+      Result[LJdx] := Result[LJdx] xor LTemp[LJdx];
+      System.Inc(LJdx);
     end;
-    System.Inc(i);
+    System.Inc(LIdx);
   end;
   System.Inc(FBlock);
-  result := ret;
 end;
 
-function TPBKDF2_HMACNotBuildInAdapter.GetBytes(bc: Int32): THashLibByteArray;
+function TPBKDF2_HMACNotBuildInAdapter.GetBytes(AByteCount: Int32)
+  : THashLibByteArray;
 var
-  LKey, LT_block: THashLibByteArray;
-  LOffset, LSize, LRemainder: Int32;
+  LKey, LT_Block: THashLibByteArray;
+  LOffset, LSize, LRemainder, LRemCount: Int32;
 begin
 
-  if (bc <= 0) then
-    raise EArgumentOutOfRangeHashLibException.CreateRes(@SInvalidArgument);
+  if (AByteCount <= 0) then
+  begin
+    raise EArgumentHashLibException.CreateRes(@SInvalidByteCount);
+  end;
 
-  System.SetLength(LKey, bc);
+  System.SetLength(LKey, AByteCount);
 
   LOffset := 0;
-  LSize := FendIndex - FstartIndex;
+  LSize := FEndIndex - FStartIndex;
   if (LSize > 0) then
   begin
-    if (bc >= LSize) then
+    if (AByteCount >= LSize) then
     begin
-      System.Move(Fbuffer[FstartIndex], LKey[0], LSize);
-      FstartIndex := 0;
-      FendIndex := 0;
+      System.Move(FBuffer[FStartIndex], LKey[0], LSize);
+      FStartIndex := 0;
+      FEndIndex := 0;
       LOffset := LOffset + LSize;
     end
     else
     begin
-      System.Move(Fbuffer[FstartIndex], LKey[0], bc);
-      FstartIndex := FstartIndex + bc;
-      result := LKey;
+      System.Move(FBuffer[FStartIndex], LKey[0], AByteCount);
+      FStartIndex := FStartIndex + AByteCount;
+      Result := LKey;
       Exit;
     end;
   end;
 
-  if ((FstartIndex <> 0) and (FendIndex <> 0)) then
-    raise EArgumentHashLibException.CreateRes(@SInvalidIndex);
-
-  while (LOffset < bc) do
+  if ((FStartIndex <> 0) and (FEndIndex <> 0)) then
   begin
-    LT_block := Func();
-    LRemainder := bc - LOffset;
+    raise EArgumentHashLibException.CreateRes(@SInvalidIndex);
+  end;
+
+  while (LOffset < AByteCount) do
+  begin
+    LT_Block := Func();
+    LRemainder := AByteCount - LOffset;
     if (LRemainder > FBlockSize) then
     begin
-      System.Move(LT_block[0], LKey[LOffset], FBlockSize);
+      System.Move(LT_Block[0], LKey[LOffset], FBlockSize);
       LOffset := LOffset + FBlockSize;
     end
     else
     begin
-      System.Move(LT_block[0], LKey[LOffset], LRemainder);
-      System.Move(LT_block[LRemainder], Fbuffer[FstartIndex],
-        FBlockSize - LRemainder);
-      FendIndex := FendIndex + (FBlockSize - LRemainder);
-      result := LKey;
+      if (LRemainder > 0) then
+      begin
+        System.Move(LT_Block[0], LKey[LOffset], LRemainder);
+      end;
+      LRemCount := FBlockSize - LRemainder;
+      if LRemCount > 0 then
+      begin
+        System.Move(LT_Block[LRemainder], FBuffer[FStartIndex], LRemCount);
+      end;
+      FEndIndex := FEndIndex + LRemCount;
+      Result := LKey;
       Exit;
     end;
   end;
-  result := LKey;
-
+  Result := LKey;
 end;
 
 procedure TPBKDF2_HMACNotBuildInAdapter.Initialize;
 begin
-  if (Fbuffer <> Nil) then
-    System.FillChar(Fbuffer[0], System.Length(Fbuffer) *
-      System.SizeOf(Byte), Byte(0));
+  TArrayUtils.ZeroFill(FBuffer);
 
-  FHMAC := THashFactory.THMAC.CreateHMAC(FHash);
+  FHMAC := THMACNotBuildInAdapter.CreateHMAC(FHash, FPassword);
 
-  FHMAC.Key := System.Copy(FPassword);
   FBlockSize := FHMAC.HashSize;
-  System.SetLength(Fbuffer, FBlockSize);
+  System.SetLength(FBuffer, FBlockSize);
   FBlock := 1;
-  FstartIndex := 0;
-  FendIndex := 0;
+  FStartIndex := 0;
+  FEndIndex := 0;
 end;
 
 end.

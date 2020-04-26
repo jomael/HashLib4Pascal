@@ -7,15 +7,16 @@ interface
 uses
   HlpHashLibTypes,
   HlpHash,
+  HlpIHash,
   HlpIHashInfo,
   HlpHashResult,
   HlpIHashResult;
 
 type
-  TPJW = class sealed(THash, IHash32, IBlockHash, ITransformBlock)
+  TPJW = class sealed(THash, IHash32, ITransformBlock)
   strict private
-
-    Fm_hash: UInt32;
+  var
+    FHash: UInt32;
 
   const
     UInt32MaxValue = UInt32(4294967295);
@@ -27,14 +28,25 @@ type
   public
     constructor Create();
     procedure Initialize(); override;
-    procedure TransformBytes(a_data: THashLibByteArray;
-      a_index, a_length: Int32); override;
+    procedure TransformBytes(const AData: THashLibByteArray;
+      AIndex, ALength: Int32); override;
     function TransformFinal(): IHashResult; override;
+    function Clone(): IHash; override;
   end;
 
 implementation
 
 { TPJW }
+
+function TPJW.Clone(): IHash;
+var
+  LHashInstance: TPJW;
+begin
+  LHashInstance := TPJW.Create();
+  LHashInstance.FHash := FHash;
+  result := LHashInstance as IHash;
+  result.BufferSize := BufferSize;
+end;
 
 constructor TPJW.Create;
 begin
@@ -43,36 +55,37 @@ end;
 
 procedure TPJW.Initialize;
 begin
-  Fm_hash := 0;
+  FHash := 0;
 end;
 
-procedure TPJW.TransformBytes(a_data: THashLibByteArray;
-  a_index, a_length: Int32);
+procedure TPJW.TransformBytes(const AData: THashLibByteArray;
+  AIndex, ALength: Int32);
 var
-  i: Int32;
-  test: UInt32;
+  LIdx: Int32;
+  LTest: UInt32;
 begin
 {$IFDEF DEBUG}
-  System.Assert(a_index >= 0);
-  System.Assert(a_length >= 0);
-  System.Assert(a_index + a_length <= System.Length(a_data));
+  System.Assert(AIndex >= 0);
+  System.Assert(ALength >= 0);
+  System.Assert(AIndex + ALength <= System.Length(AData));
 {$ENDIF DEBUG}
-  i := a_index;
-  while a_length > 0 do
+  LIdx := AIndex;
+  while ALength > 0 do
   begin
-    Fm_hash := (Fm_hash shl OneEighth) + a_data[i];
-    test := Fm_hash and HighBits;
-    if (test <> 0) then
-      Fm_hash := ((Fm_hash xor (test shr ThreeQuarters)) and (not HighBits));
-    System.Inc(i);
-    System.Dec(a_length);
+    FHash := (FHash shl OneEighth) + AData[LIdx];
+    LTest := FHash and HighBits;
+    if (LTest <> 0) then
+    begin
+      FHash := ((FHash xor (LTest shr ThreeQuarters)) and (not HighBits));
+    end;
+    System.Inc(LIdx);
+    System.Dec(ALength);
   end;
-
 end;
 
 function TPJW.TransformFinal: IHashResult;
 begin
-  result := THashResult.Create(Fm_hash);
+  result := THashResult.Create(FHash);
   Initialize();
 end;
 

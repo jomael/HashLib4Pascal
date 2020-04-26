@@ -5,29 +5,31 @@ unit HlpBlake2B;
 interface
 
 uses
-{$IFDEF DELPHI2010}
-  SysUtils, // to get rid of compiler hint "not inlined" on Delphi 2010.
-{$ENDIF DELPHI2010}
+  SysUtils,
   HlpBits,
-{$IFDEF DELPHI}
-  HlpHashBuffer,
-  HlpBitConverter,
-{$ENDIF DELPHI}
   HlpHash,
   HlpHashResult,
   HlpIHashResult,
-  HlpIBlake2BConfig,
-  HlpBlake2BConfig,
-  HlpBlake2BIvBuilder,
+  HlpIBlake2BParams,
+  HlpBlake2BParams,
+  HlpIHash,
   HlpIHashInfo,
   HlpConverters,
+  HlpArrayUtils,
   HlpHashLibTypes;
 
 resourcestring
   SInvalidConfigLength = 'Config Length Must Be 8 Words';
+  SConfigNil = 'Config Cannot Be Nil';
+  SInvalidXOFSize =
+    'XOFSize in Bits must be Multiples of 8 and be Between %u and %u Bytes.';
+  SOutputLengthInvalid = 'Output Length is above the Digest Length';
+  SOutputBufferTooShort = 'Output Buffer Too Short';
+  SMaximumOutputLengthExceeded = '"Maximum Length is 2^32 blocks of 64 bytes';
+  SWritetoXofAfterReadError = '"%s" Write to Xof after Read not Allowed';
 
 type
-  TBlake2B = class sealed(THash, ICryptoNotBuildIn, ITransformBlock)
+  TBlake2B = class(THash, ICryptoNotBuildIn, ITransformBlock)
   strict private
 
 {$REGION 'Consts'}
@@ -60,41 +62,174 @@ type
       4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3);
 {$ENDIF USE_UNROLLED_VARIANT}
 {$ENDREGION}
-    class var
-
-      FDefaultConfig: IBlake2BConfig;
 
   var
-    FrawConfig, Fm_state: THashLibUInt64Array;
-    FKey, F_buf: THashLibByteArray;
-    F_m: array [0 .. 15] of UInt64;
-{$IFNDEF USE_UNROLLED_VARIANT}
-    F_v: array [0 .. 15] of UInt64;
-{$ENDIF USE_UNROLLED_VARIANT}
-    F_bufferFilled: Int32;
+    FTreeConfig: IBlake2BTreeConfig;
+    FConfig: IBlake2BConfig;
+    FDoTransformKeyBlock: Boolean;
 
-    F_counter0, F_counter1, F_finalizationFlag0, F_finalizationFlag1: UInt64;
-
-    class constructor Blake2BConfig();
+    procedure Blake2BIncrementCounter(AIncrementCount: UInt64); inline;
 
 {$IFNDEF USE_UNROLLED_VARIANT}
     procedure G(a, b, c, d, r, i: Int32); inline;
 {$ENDIF USE_UNROLLED_VARIANT}
-    procedure Compress(block: PByte; start: Int32); inline;
-
-    procedure Finish(); inline;
+    procedure MixScalar();
+    procedure Compress(ABlock: PByte; AStart: Int32); inline;
 
   strict protected
+  var
+    FM: array [0 .. 15] of UInt64;
+    FState: THashLibUInt64Array;
+    FBuffer: THashLibByteArray;
+{$IFNDEF USE_UNROLLED_VARIANT}
+    FV: array [0 .. 15] of UInt64;
+{$ENDIF USE_UNROLLED_VARIANT}
+    FFilledBufferCount: Int32;
+    FCounter0, FCounter1, FFinalizationFlag0, FFinalizationFlag1: UInt64;
 
-    FHashSize, FBlockSize: Int32;
+    procedure Finish();
+    function GetName: String; override;
 
   public
     constructor Create(); overload;
-    constructor Create(config: IBlake2BConfig); overload;
+    constructor Create(const AConfig: IBlake2BConfig); overload;
+    constructor Create(const AConfig: IBlake2BConfig;
+      const ATreeConfig: IBlake2BTreeConfig;
+      ADoTransformKeyBlock: Boolean = True); overload;
     procedure Initialize; override;
-    procedure TransformBytes(a_data: THashLibByteArray;
-      a_index, a_data_length: Int32); override;
+    procedure TransformBytes(const AData: THashLibByteArray;
+      AIndex, ADataLength: Int32); override;
     function TransformFinal: IHashResult; override;
+    function CloneInternal(): TBlake2B;
+    function Clone(): IHash; override;
+
+  end;
+
+type
+  /// <summary>
+  /// <b>TBlake2XBConfig</b> is used to configure hash function parameters and
+  /// keying.
+  /// </summary>
+  TBlake2XBConfig = record
+  private
+  var
+    FBlake2BConfig: IBlake2BConfig; // blake2b config object
+    FBlake2BTreeConfig: IBlake2BTreeConfig; // blake2b tree config object
+
+    function GetBlake2BConfig(): IBlake2BConfig; inline;
+    procedure SetBlake2BConfig(const AValue: IBlake2BConfig); inline;
+    function GetBlake2BTreeConfig(): IBlake2BTreeConfig; inline;
+    procedure SetBlake2BTreeConfig(const AValue: IBlake2BTreeConfig); inline;
+  public
+  var
+
+    constructor Create(ABlake2BConfig: IBlake2BConfig;
+      ABlake2BTreeConfig: IBlake2BTreeConfig);
+
+    function Clone(): TBlake2XBConfig;
+
+    property Blake2BConfig: IBlake2BConfig read GetBlake2BConfig
+      write SetBlake2BConfig;
+
+    property Blake2BTreeConfig: IBlake2BTreeConfig read GetBlake2BTreeConfig
+      write SetBlake2BTreeConfig;
+  end;
+
+type
+  TBlake2XB = class sealed(TBlake2B, IXOF)
+  strict private
+  const
+    Blake2BHashSize = Int32(64);
+
+  const
+    // Magic number to indicate an unknown length of digest
+    UnknownDigestLengthInBytes = UInt32((UInt64(1) shl 32) - 1);
+    // 4294967295 bytes
+    MaxNumberBlocks = UInt64(1) shl 32;
+    // 2^32 blocks of 64 bytes (256GiB)
+    // the maximum size in bytes the digest can produce when the length is unknown
+    UnknownMaxDigestLengthInBytes = UInt64(MaxNumberBlocks *
+      UInt64(Blake2BHashSize));
+
+  var
+    FXOFSizeInBits: UInt64;
+
+    function GetXOFSizeInBits: UInt64; inline;
+    procedure SetXOFSizeInBits(AXofSizeInBits: UInt64); inline;
+    function SetXOFSizeInBitsInternal(AXofSizeInBits: UInt64): IXOF;
+
+    function NodeOffsetWithXOFDigestLength(AXOFSizeInBytes: UInt64)
+      : UInt64; inline;
+
+    function ComputeStepLength(): Int32; inline;
+
+    function GetResult(): THashLibByteArray;
+
+    constructor CreateInternal(const AConfig: IBlake2BConfig;
+      const ATreeConfig: IBlake2BTreeConfig);
+
+  strict protected
+  var
+    FBlake2XBConfig: TBlake2XBConfig;
+    FDigestPosition: UInt64;
+    FRootConfig, FOutputConfig: TBlake2XBConfig;
+    FRootHashDigest, FBlake2XBBuffer: THashLibByteArray;
+    FFinalized: Boolean;
+
+    function GetName: String; override;
+    property XOFSizeInBits: UInt64 read GetXOFSizeInBits write SetXOFSizeInBits;
+
+  public
+
+    constructor Create(const ABlake2XBConfig: TBlake2XBConfig);
+    procedure Initialize(); override;
+    function Clone(): IHash; override;
+    procedure TransformBytes(const AData: THashLibByteArray;
+      AIndex, ADataLength: Int32); override;
+    function TransformFinal(): IHashResult; override;
+
+    procedure DoOutput(const ADestination: THashLibByteArray;
+      ADestinationOffset, AOutputLength: UInt64);
+
+  end;
+
+type
+  TBlake2BMACNotBuildInAdapter = class sealed(THash, IBlake2BMAC,
+    IBlake2BMACNotBuildIn, ICrypto, ICryptoNotBuildIn)
+
+  strict private
+  var
+    FHash: IHash;
+    FKey: THashLibByteArray;
+
+    constructor Create(const ABlake2BKey, ASalt, APersonalisation
+      : THashLibByteArray; AOutputLengthInBits: Int32); overload;
+    constructor Create(const AHash: IHash;
+      const ABlake2BKey: THashLibByteArray); overload;
+
+  strict protected
+
+    function GetName: String; override;
+
+    function GetKey(): THashLibByteArray;
+    procedure SetKey(const AValue: THashLibByteArray);
+
+  public
+
+    destructor Destroy; override;
+
+    procedure Clear();
+
+    procedure Initialize(); override;
+    function TransformFinal(): IHashResult; override;
+    procedure TransformBytes(const AData: THashLibByteArray;
+      AIndex, ALength: Int32); override;
+    function Clone(): IHash; override;
+    property Key: THashLibByteArray read GetKey write SetKey;
+    property Name: String read GetName;
+
+    class function CreateBlake2BMAC(const ABlake2BKey, ASalt, APersonalisation
+      : THashLibByteArray; AOutputLengthInBits: Int32): IBlake2BMAC; static;
 
   end;
 
@@ -102,14 +237,15 @@ implementation
 
 { TBlake2B }
 
-class constructor TBlake2B.Blake2BConfig;
-begin
-  FDefaultConfig := TBlake2BConfig.Create();
-end;
-
 constructor TBlake2B.Create();
 begin
-  Create(TBlake2BConfig.Create());
+  Create(TBlake2BConfig.Create() as IBlake2BConfig);
+end;
+
+procedure TBlake2B.Blake2BIncrementCounter(AIncrementCount: UInt64);
+begin
+  FCounter0 := FCounter0 + AIncrementCount;
+  System.Inc(FCounter1, Ord(FCounter0 < AIncrementCount));
 end;
 
 {$IFNDEF USE_UNROLLED_VARIANT}
@@ -122,19 +258,48 @@ begin
   p0 := Sigma[p];
   p1 := Sigma[p + 1];
 
-  F_v[a] := F_v[a] + (F_v[b] + F_m[p0]);
-  F_v[d] := TBits.RotateRight64(F_v[d] xor F_v[a], 32);
-  F_v[c] := F_v[c] + F_v[d];
-  F_v[b] := TBits.RotateRight64(F_v[b] xor F_v[c], 24);
-  F_v[a] := F_v[a] + (F_v[b] + F_m[p1]);
-  F_v[d] := TBits.RotateRight64(F_v[d] xor F_v[a], 16);
-  F_v[c] := F_v[c] + F_v[d];
-  F_v[b] := TBits.RotateRight64(F_v[b] xor F_v[c], 63);
+  FV[a] := FV[a] + (FV[b] + FM[p0]);
+  FV[d] := TBits.RotateRight64(FV[d] xor FV[a], 32);
+  FV[c] := FV[c] + FV[d];
+  FV[b] := TBits.RotateRight64(FV[b] xor FV[c], 24);
+  FV[a] := FV[a] + (FV[b] + FM[p1]);
+  FV[d] := TBits.RotateRight64(FV[d] xor FV[a], 16);
+  FV[c] := FV[c] + FV[d];
+  FV[b] := TBits.RotateRight64(FV[b] xor FV[c], 63);
 end;
 
 {$ENDIF USE_UNROLLED_VARIANT}
 
-procedure TBlake2B.Compress(block: PByte; start: Int32);
+function TBlake2B.CloneInternal(): TBlake2B;
+var
+  LTreeConfig: IBlake2BTreeConfig;
+begin
+  LTreeConfig := Nil;
+  if FTreeConfig <> Nil then
+  begin
+    LTreeConfig := FTreeConfig.Clone();
+  end;
+  Result := TBlake2B.Create(FConfig.Clone(), LTreeConfig, FDoTransformKeyBlock);
+  System.Move(FM, Result.FM, System.SizeOf(FM));
+  Result.FState := System.Copy(FState);
+  Result.FBuffer := System.Copy(FBuffer);
+{$IFNDEF USE_UNROLLED_VARIANT}
+  System.Move(FV, Result.FV, System.SizeOf(FV));
+{$ENDIF USE_UNROLLED_VARIANT}
+  Result.FFilledBufferCount := FFilledBufferCount;
+  Result.FCounter0 := FCounter0;
+  Result.FCounter1 := FCounter1;
+  Result.FFinalizationFlag0 := FFinalizationFlag0;
+  Result.FFinalizationFlag1 := FFinalizationFlag1;
+  Result.BufferSize := BufferSize;
+end;
+
+function TBlake2B.Clone(): IHash;
+begin
+  Result := CloneInternal() as IHash;
+end;
+
+procedure TBlake2B.MixScalar;
 var
 {$IFDEF USE_UNROLLED_VARIANT}
   m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, v0, v1,
@@ -145,1432 +310,1430 @@ var
 
 {$ENDIF USE_UNROLLED_VARIANT}
 begin
-  TConverters.le64_copy(block, start, @(F_m[0]), 0, FBlockSize);
-
 {$IFDEF USE_UNROLLED_VARIANT}
-  m0 := F_m[0];
-  m1 := F_m[1];
-  m2 := F_m[2];
-  m3 := F_m[3];
-  m4 := F_m[4];
-  m5 := F_m[5];
-  m6 := F_m[6];
-  m7 := F_m[7];
-  m8 := F_m[8];
-  m9 := F_m[9];
-  m10 := F_m[10];
-  m11 := F_m[11];
-  m12 := F_m[12];
-  m13 := F_m[13];
-  m14 := F_m[14];
-  m15 := F_m[15];
+  m0 := FM[0];
+  m1 := FM[1];
+  m2 := FM[2];
+  m3 := FM[3];
+  m4 := FM[4];
+  m5 := FM[5];
+  m6 := FM[6];
+  m7 := FM[7];
+  m8 := FM[8];
+  m9 := FM[9];
+  m10 := FM[10];
+  m11 := FM[11];
+  m12 := FM[12];
+  m13 := FM[13];
+  m14 := FM[14];
+  m15 := FM[15];
 
-  v0 := Fm_state[0];
-  v1 := Fm_state[1];
-  v2 := Fm_state[2];
-  v3 := Fm_state[3];
-  v4 := Fm_state[4];
-  v5 := Fm_state[5];
-  v6 := Fm_state[6];
-  v7 := Fm_state[7];
+  v0 := FState[0];
+  v1 := FState[1];
+  v2 := FState[2];
+  v3 := FState[3];
+  v4 := FState[4];
+  v5 := FState[5];
+  v6 := FState[6];
+  v7 := FState[7];
 
   v8 := IV0;
   v9 := IV1;
   v10 := IV2;
   v11 := IV3;
-  v12 := IV4 xor F_counter0;
-  v13 := IV5 xor F_counter1;
-  v14 := IV6 xor F_finalizationFlag0;
-  v15 := IV7 xor F_finalizationFlag1;
+  v12 := IV4 xor FCounter0;
+  v13 := IV5 xor FCounter1;
+  v14 := IV6 xor FFinalizationFlag0;
+  v15 := IV7 xor FFinalizationFlag1;
 
   // Rounds
 
-  // ##### Round(0) #####
+  // ##### Round(0)
   // G(0, 0, v0, v4, v8, v12)
   v0 := v0 + v4 + m0;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v0 := v0 + v4 + m1;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // G(0, 1, v1, v5, v9, v13)
   v1 := v1 + v5 + m2;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v1 := v1 + v5 + m3;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(0, 2, v2, v6, v10, v14)
   v2 := v2 + v6 + m4;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v2 := v2 + v6 + m5;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(0, 3, v3, v7, v11, v15)
   v3 := v3 + v7 + m6;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v3 := v3 + v7 + m7;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(0, 4, v0, v5, v10, v15)
   v0 := v0 + v5 + m8;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v0 := v0 + v5 + m9;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(0, 5, v1, v6, v11, v12)
   v1 := v1 + v6 + m10;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v1 := v1 + v6 + m11;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(0, 6, v2, v7, v8, v13)
   v2 := v2 + v7 + m12;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v2 := v2 + v7 + m13;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(0, 7, v3, v4, v9, v14)
   v3 := v3 + v4 + m14;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v3 := v3 + v4 + m15;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
-  // ##### Round(1) #####
+  // ##### Round(1)
   // G(1, 0, v0, v4, v8, v12)
   v0 := v0 + v4 + m14;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v0 := v0 + v4 + m10;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // G(1, 1, v1, v5, v9, v13)
   v1 := v1 + v5 + m4;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v1 := v1 + v5 + m8;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(1, 2, v2, v6, v10, v14)
   v2 := v2 + v6 + m9;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v2 := v2 + v6 + m15;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(1, 3, v3, v7, v11, v15)
   v3 := v3 + v7 + m13;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v3 := v3 + v7 + m6;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(1, 4, v0, v5, v10, v15)
   v0 := v0 + v5 + m1;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v0 := v0 + v5 + m12;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(1, 5, v1, v6, v11, v12)
   v1 := v1 + v6 + m0;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v1 := v1 + v6 + m2;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(1, 6, v2, v7, v8, v13)
   v2 := v2 + v7 + m11;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v2 := v2 + v7 + m7;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(1, 7, v3, v4, v9, v14)
   v3 := v3 + v4 + m5;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v3 := v3 + v4 + m3;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
-  // ##### Round(2) #####
+  // ##### Round(2)
   // G(2, 0, v0, v4, v8, v12)
   v0 := v0 + v4 + m11;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v0 := v0 + v4 + m8;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // G(2, 1, v1, v5, v9, v13)
   v1 := v1 + v5 + m12;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v1 := v1 + v5 + m0;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(2, 2, v2, v6, v10, v14)
   v2 := v2 + v6 + m5;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v2 := v2 + v6 + m2;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(2, 3, v3, v7, v11, v15)
   v3 := v3 + v7 + m15;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v3 := v3 + v7 + m13;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(2, 4, v0, v5, v10, v15)
   v0 := v0 + v5 + m10;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v0 := v0 + v5 + m14;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(2, 5, v1, v6, v11, v12)
   v1 := v1 + v6 + m3;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v1 := v1 + v6 + m6;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(2, 6, v2, v7, v8, v13)
   v2 := v2 + v7 + m7;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v2 := v2 + v7 + m1;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(2, 7, v3, v4, v9, v14)
   v3 := v3 + v4 + m9;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v3 := v3 + v4 + m4;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
-  // ##### Round(3) #####
+  // ##### Round(3)
   // G(3, 0, v0, v4, v8, v12)
   v0 := v0 + v4 + m7;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v0 := v0 + v4 + m9;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // G(3, 1, v1, v5, v9, v13)
   v1 := v1 + v5 + m3;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v1 := v1 + v5 + m1;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(3, 2, v2, v6, v10, v14)
   v2 := v2 + v6 + m13;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v2 := v2 + v6 + m12;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(3, 3, v3, v7, v11, v15)
   v3 := v3 + v7 + m11;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v3 := v3 + v7 + m14;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(3, 4, v0, v5, v10, v15)
   v0 := v0 + v5 + m2;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v0 := v0 + v5 + m6;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(3, 5, v1, v6, v11, v12)
   v1 := v1 + v6 + m5;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v1 := v1 + v6 + m10;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(3, 6, v2, v7, v8, v13)
   v2 := v2 + v7 + m4;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v2 := v2 + v7 + m0;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(3, 7, v3, v4, v9, v14)
   v3 := v3 + v4 + m15;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v3 := v3 + v4 + m8;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
-  // ##### Round(4) #####
+  // ##### Round(4)
   // G(4, 0, v0, v4, v8, v12)
   v0 := v0 + v4 + m9;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v0 := v0 + v4 + m0;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // G(4, 1, v1, v5, v9, v13)
   v1 := v1 + v5 + m5;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v1 := v1 + v5 + m7;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(4, 2, v2, v6, v10, v14)
   v2 := v2 + v6 + m2;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v2 := v2 + v6 + m4;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(4, 3, v3, v7, v11, v15)
   v3 := v3 + v7 + m10;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v3 := v3 + v7 + m15;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(4, 4, v0, v5, v10, v15)
   v0 := v0 + v5 + m14;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v0 := v0 + v5 + m1;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(4, 5, v1, v6, v11, v12)
   v1 := v1 + v6 + m11;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v1 := v1 + v6 + m12;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(4, 6, v2, v7, v8, v13)
   v2 := v2 + v7 + m6;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v2 := v2 + v7 + m8;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(4, 7, v3, v4, v9, v14)
   v3 := v3 + v4 + m3;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v3 := v3 + v4 + m13;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
-  // ##### Round(5) #####
+  // ##### Round(5)
   // G(5, 0, v0, v4, v8, v12)
   v0 := v0 + v4 + m2;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v0 := v0 + v4 + m12;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // G(5, 1, v1, v5, v9, v13)
   v1 := v1 + v5 + m6;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v1 := v1 + v5 + m10;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(5, 2, v2, v6, v10, v14)
   v2 := v2 + v6 + m0;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v2 := v2 + v6 + m11;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(5, 3, v3, v7, v11, v15)
   v3 := v3 + v7 + m8;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v3 := v3 + v7 + m3;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(5, 4, v0, v5, v10, v15)
   v0 := v0 + v5 + m4;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v0 := v0 + v5 + m13;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(5, 5, v1, v6, v11, v12)
   v1 := v1 + v6 + m7;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v1 := v1 + v6 + m5;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(5, 6, v2, v7, v8, v13)
   v2 := v2 + v7 + m15;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v2 := v2 + v7 + m14;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(5, 7, v3, v4, v9, v14)
   v3 := v3 + v4 + m1;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v3 := v3 + v4 + m9;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
-  // ##### Round(6) #####
+  // ##### Round(6)
   // G(6, 0, v0, v4, v8, v12)
   v0 := v0 + v4 + m12;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v0 := v0 + v4 + m5;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // G(6, 1, v1, v5, v9, v13)
   v1 := v1 + v5 + m1;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v1 := v1 + v5 + m15;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(6, 2, v2, v6, v10, v14)
   v2 := v2 + v6 + m14;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v2 := v2 + v6 + m13;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(6, 3, v3, v7, v11, v15)
   v3 := v3 + v7 + m4;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v3 := v3 + v7 + m10;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(6, 4, v0, v5, v10, v15)
   v0 := v0 + v5 + m0;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v0 := v0 + v5 + m7;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(6, 5, v1, v6, v11, v12)
   v1 := v1 + v6 + m6;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v1 := v1 + v6 + m3;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(6, 6, v2, v7, v8, v13)
   v2 := v2 + v7 + m9;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v2 := v2 + v7 + m2;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(6, 7, v3, v4, v9, v14)
   v3 := v3 + v4 + m8;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v3 := v3 + v4 + m11;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
-  // ##### Round(7) #####
+  // ##### Round(7)
   // G(7, 0, v0, v4, v8, v12)
   v0 := v0 + v4 + m13;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v0 := v0 + v4 + m11;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // G(7, 1, v1, v5, v9, v13)
   v1 := v1 + v5 + m7;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v1 := v1 + v5 + m14;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(7, 2, v2, v6, v10, v14)
   v2 := v2 + v6 + m12;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v2 := v2 + v6 + m1;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(7, 3, v3, v7, v11, v15)
   v3 := v3 + v7 + m3;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v3 := v3 + v7 + m9;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(7, 4, v0, v5, v10, v15)
   v0 := v0 + v5 + m5;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v0 := v0 + v5 + m0;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(7, 5, v1, v6, v11, v12)
   v1 := v1 + v6 + m15;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v1 := v1 + v6 + m4;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(7, 6, v2, v7, v8, v13)
   v2 := v2 + v7 + m8;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v2 := v2 + v7 + m6;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(7, 7, v3, v4, v9, v14)
   v3 := v3 + v4 + m2;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v3 := v3 + v4 + m10;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
-  // ##### Round(8) #####
+  // ##### Round(8)
   // G(8, 0, v0, v4, v8, v12)
   v0 := v0 + v4 + m6;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v0 := v0 + v4 + m15;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // G(8, 1, v1, v5, v9, v13)
   v1 := v1 + v5 + m14;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v1 := v1 + v5 + m9;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(8, 2, v2, v6, v10, v14)
   v2 := v2 + v6 + m11;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v2 := v2 + v6 + m3;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(8, 3, v3, v7, v11, v15)
   v3 := v3 + v7 + m0;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v3 := v3 + v7 + m8;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(8, 4, v0, v5, v10, v15)
   v0 := v0 + v5 + m12;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v0 := v0 + v5 + m2;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(8, 5, v1, v6, v11, v12)
   v1 := v1 + v6 + m13;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v1 := v1 + v6 + m7;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(8, 6, v2, v7, v8, v13)
   v2 := v2 + v7 + m1;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v2 := v2 + v7 + m4;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(8, 7, v3, v4, v9, v14)
   v3 := v3 + v4 + m10;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v3 := v3 + v4 + m5;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
-  // ##### Round(9) #####
+  // ##### Round(9)
   // G(9, 0, v0, v4, v8, v12)
   v0 := v0 + v4 + m10;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v0 := v0 + v4 + m2;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // G(9, 1, v1, v5, v9, v13)
   v1 := v1 + v5 + m8;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v1 := v1 + v5 + m4;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(9, 2, v2, v6, v10, v14)
   v2 := v2 + v6 + m7;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v2 := v2 + v6 + m6;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(9, 3, v3, v7, v11, v15)
   v3 := v3 + v7 + m1;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v3 := v3 + v7 + m5;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(9, 4, v0, v5, v10, v15)
   v0 := v0 + v5 + m15;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v0 := v0 + v5 + m11;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(9, 5, v1, v6, v11, v12)
   v1 := v1 + v6 + m9;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v1 := v1 + v6 + m14;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(9, 6, v2, v7, v8, v13)
   v2 := v2 + v7 + m3;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v2 := v2 + v7 + m12;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(9, 7, v3, v4, v9, v14)
   v3 := v3 + v4 + m13;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v3 := v3 + v4 + m0;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
-  // ##### Round(10) #####
+  // ##### Round(10)
   // G(10, 0, v0, v4, v8, v12)
   v0 := v0 + v4 + m0;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v0 := v0 + v4 + m1;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // G(10, 1, v1, v5, v9, v13)
   v1 := v1 + v5 + m2;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v1 := v1 + v5 + m3;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(10, 2, v2, v6, v10, v14)
   v2 := v2 + v6 + m4;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v2 := v2 + v6 + m5;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(10, 3, v3, v7, v11, v15)
   v3 := v3 + v7 + m6;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v3 := v3 + v7 + m7;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(10, 4, v0, v5, v10, v15)
   v0 := v0 + v5 + m8;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v0 := v0 + v5 + m9;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(10, 5, v1, v6, v11, v12)
   v1 := v1 + v6 + m10;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v1 := v1 + v6 + m11;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(10, 6, v2, v7, v8, v13)
   v2 := v2 + v7 + m12;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v2 := v2 + v7 + m13;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(10, 7, v3, v4, v9, v14)
   v3 := v3 + v4 + m14;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v3 := v3 + v4 + m15;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
-  // ##### Round(11) #####
+  // ##### Round(11)
   // G(11, 0, v0, v4, v8, v12)
   v0 := v0 + v4 + m14;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v0 := v0 + v4 + m10;
   v12 := v12 xor v0;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v8 := v8 + v12;
   v4 := v4 xor v8;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // G(11, 1, v1, v5, v9, v13)
   v1 := v1 + v5 + m4;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v1 := v1 + v5 + m8;
   v13 := v13 xor v1;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v9 := v9 + v13;
   v5 := v5 xor v9;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(11, 2, v2, v6, v10, v14)
   v2 := v2 + v6 + m9;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v2 := v2 + v6 + m15;
   v14 := v14 xor v2;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v10 := v10 + v14;
   v6 := v6 xor v10;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(11, 3, v3, v7, v11, v15)
   v3 := v3 + v7 + m13;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v3 := v3 + v7 + m6;
   v15 := v15 xor v3;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v11 := v11 + v15;
   v7 := v7 xor v11;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(11, 4, v0, v5, v10, v15)
   v0 := v0 + v5 + m1;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 32) or (v15 shl (64 - 32)));
+  v15 := TBits.RotateRight64(v15, 32);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 24) or (v5 shl (64 - 24)));
+  v5 := TBits.RotateRight64(v5, 24);
   v0 := v0 + v5 + m12;
   v15 := v15 xor v0;
-  v15 := ((v15 shr 16) or (v15 shl (64 - 16)));
+  v15 := TBits.RotateRight64(v15, 16);
   v10 := v10 + v15;
   v5 := v5 xor v10;
-  v5 := ((v5 shr 63) or (v5 shl (64 - 63)));
+  v5 := TBits.RotateRight64(v5, 63);
 
   // G(11, 5, v1, v6, v11, v12)
   v1 := v1 + v6 + m0;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 32) or (v12 shl (64 - 32)));
+  v12 := TBits.RotateRight64(v12, 32);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 24) or (v6 shl (64 - 24)));
+  v6 := TBits.RotateRight64(v6, 24);
   v1 := v1 + v6 + m2;
   v12 := v12 xor v1;
-  v12 := ((v12 shr 16) or (v12 shl (64 - 16)));
+  v12 := TBits.RotateRight64(v12, 16);
   v11 := v11 + v12;
   v6 := v6 xor v11;
-  v6 := ((v6 shr 63) or (v6 shl (64 - 63)));
+  v6 := TBits.RotateRight64(v6, 63);
 
   // G(11, 6, v2, v7, v8, v13)
   v2 := v2 + v7 + m11;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 32) or (v13 shl (64 - 32)));
+  v13 := TBits.RotateRight64(v13, 32);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 24) or (v7 shl (64 - 24)));
+  v7 := TBits.RotateRight64(v7, 24);
   v2 := v2 + v7 + m7;
   v13 := v13 xor v2;
-  v13 := ((v13 shr 16) or (v13 shl (64 - 16)));
+  v13 := TBits.RotateRight64(v13, 16);
   v8 := v8 + v13;
   v7 := v7 xor v8;
-  v7 := ((v7 shr 63) or (v7 shl (64 - 63)));
+  v7 := TBits.RotateRight64(v7, 63);
 
   // G(11, 7, v3, v4, v9, v14)
   v3 := v3 + v4 + m5;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 32) or (v14 shl (64 - 32)));
+  v14 := TBits.RotateRight64(v14, 32);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 24) or (v4 shl (64 - 24)));
+  v4 := TBits.RotateRight64(v4, 24);
   v3 := v3 + v4 + m3;
   v14 := v14 xor v3;
-  v14 := ((v14 shr 16) or (v14 shl (64 - 16)));
+  v14 := TBits.RotateRight64(v14, 16);
   v9 := v9 + v14;
   v4 := v4 xor v9;
-  v4 := ((v4 shr 63) or (v4 shl (64 - 63)));
+  v4 := TBits.RotateRight64(v4, 63);
 
   // Finalization
-  Fm_state[0] := Fm_state[0] xor (v0 xor v8);
-  Fm_state[1] := Fm_state[1] xor (v1 xor v9);
-  Fm_state[2] := Fm_state[2] xor (v2 xor v10);
-  Fm_state[3] := Fm_state[3] xor (v3 xor v11);
-  Fm_state[4] := Fm_state[4] xor (v4 xor v12);
-  Fm_state[5] := Fm_state[5] xor (v5 xor v13);
-  Fm_state[6] := Fm_state[6] xor (v6 xor v14);
-  Fm_state[7] := Fm_state[7] xor (v7 xor v15);
+  FState[0] := FState[0] xor (v0 xor v8);
+  FState[1] := FState[1] xor (v1 xor v9);
+  FState[2] := FState[2] xor (v2 xor v10);
+  FState[3] := FState[3] xor (v3 xor v11);
+  FState[4] := FState[4] xor (v4 xor v12);
+  FState[5] := FState[5] xor (v5 xor v13);
+  FState[6] := FState[6] xor (v6 xor v14);
+  FState[7] := FState[7] xor (v7 xor v15);
 
 {$ELSE}
-  F_v[0] := Fm_state[0];
-  F_v[1] := Fm_state[1];
-  F_v[2] := Fm_state[2];
-  F_v[3] := Fm_state[3];
-  F_v[4] := Fm_state[4];
-  F_v[5] := Fm_state[5];
-  F_v[6] := Fm_state[6];
-  F_v[7] := Fm_state[7];
+  FV[0] := FState[0];
+  FV[1] := FState[1];
+  FV[2] := FState[2];
+  FV[3] := FState[3];
+  FV[4] := FState[4];
+  FV[5] := FState[5];
+  FV[6] := FState[6];
+  FV[7] := FState[7];
 
-  F_v[8] := IV0;
-  F_v[9] := IV1;
-  F_v[10] := IV2;
-  F_v[11] := IV3;
-  F_v[12] := IV4 xor F_counter0;
-  F_v[13] := IV5 xor F_counter1;
+  FV[8] := IV0;
+  FV[9] := IV1;
+  FV[10] := IV2;
+  FV[11] := IV3;
+  FV[12] := IV4 xor FCounter0;
+  FV[13] := IV5 xor FCounter1;
 
-  F_v[14] := IV6 xor F_finalizationFlag0;
+  FV[14] := IV6 xor FFinalizationFlag0;
 
-  F_v[15] := IV7 xor F_finalizationFlag1;
+  FV[15] := IV7 xor FFinalizationFlag1;
 
   for r := 0 to System.Pred(NumberOfRounds) do
 
@@ -1587,161 +1750,613 @@ begin
 
   for i := 0 to 7 do
   begin
-    Fm_state[i] := Fm_state[i] xor (F_v[i] xor F_v[i + 8]);
+    FState[i] := FState[i] xor (FV[i] xor FV[i + 8]);
   end;
 
 {$ENDIF USE_UNROLLED_VARIANT}
 end;
 
-constructor TBlake2B.Create(config: IBlake2BConfig);
+procedure TBlake2B.Compress(ABlock: PByte; AStart: Int32);
 begin
+  TConverters.le64_copy(ABlock, AStart, @(FM[0]), 0, BlockSize);
+  MixScalar();
+end;
 
-  FBlockSize := BlockSizeInBytes;
+constructor TBlake2B.Create(const AConfig: IBlake2BConfig);
+begin
+  Create(AConfig, Nil);
+end;
 
-  if (config = Nil) then
+constructor TBlake2B.Create(const AConfig: IBlake2BConfig;
+  const ATreeConfig: IBlake2BTreeConfig; ADoTransformKeyBlock: Boolean);
+begin
+  FConfig := AConfig;
+  FTreeConfig := ATreeConfig;
+  FDoTransformKeyBlock := ADoTransformKeyBlock;
+
+  if (FConfig = Nil) then
   begin
-    config := FDefaultConfig;
+    FConfig := TBlake2BConfig.DefaultConfig;
   end;
 
-  FrawConfig := TBlake2BIvBuilder.ConfigB(config, Nil);
-  if ((config.Key <> Nil) and (System.Length(config.Key) <> 0)) then
-  begin
+  System.SetLength(FState, 8);
 
-    FKey := System.Copy(config.Key, System.Low(config.Key), System.Length(config.Key));
+  System.SetLength(FBuffer, BlockSizeInBytes);
 
-    System.SetLength(FKey, FBlockSize);
-
-  end;
-  FHashSize := config.HashSize;
-
-  System.SetLength(Fm_state, 8);
-
-  Inherited Create(FHashSize, FBlockSize);
-
+  Inherited Create(FConfig.HashSize, BlockSizeInBytes);
 end;
 
 procedure TBlake2B.Finish;
-
+var
+  LCount: Int32;
+  LPtrBuffer: PByte;
 begin
-
   // Last compression
+  Blake2BIncrementCounter(UInt64(FFilledBufferCount));
 
-  F_counter0 := F_counter0 + UInt64(F_bufferFilled);
+  FFinalizationFlag0 := System.High(UInt64);
 
-  F_finalizationFlag0 := System.High(UInt64);
+  if (FTreeConfig <> Nil) and (FTreeConfig.IsLastNode) then
+  begin
+    FFinalizationFlag1 := System.High(UInt64);
+  end;
 
-  System.FillChar(F_buf[F_bufferFilled],
-    (System.Length(F_buf) - F_bufferFilled), Byte(0));
+  LCount := System.Length(FBuffer) - FFilledBufferCount;
 
-  Compress(PByte(F_buf), 0);
-
+  if LCount > 0 then
+  begin
+    TArrayUtils.Fill(FBuffer, FFilledBufferCount,
+      LCount + FFilledBufferCount, Byte(0));
+  end;
+  LPtrBuffer := PByte(FBuffer);
+  Compress(LPtrBuffer, 0);
 end;
 
 procedure TBlake2B.Initialize;
 var
-  i: Integer;
+  LIdx: Int32;
+  LBlock: THashLibByteArray;
+  LRawConfig: THashLibUInt64Array;
 begin
-  if (FrawConfig = Nil) then
-    raise EArgumentNilHashLibException.Create('config');
-  if (System.Length(FrawConfig) <> 8) then
+  LRawConfig := TBlake2BIvBuilder.ConfigB(FConfig, FTreeConfig);
+  LBlock := Nil;
+
+  if FDoTransformKeyBlock then
+  begin
+    if ((FConfig.Key <> Nil) and (System.Length(FConfig.Key) <> 0)) then
+    begin
+      LBlock := System.Copy(FConfig.Key, System.Low(FConfig.Key),
+        System.Length(FConfig.Key));
+      System.SetLength(LBlock, BlockSizeInBytes);
+    end;
+  end;
+
+  if (LRawConfig = Nil) then
+  begin
+    raise EArgumentNilHashLibException.CreateRes(@SConfigNil);
+  end;
+  if (System.Length(LRawConfig) <> 8) then
   begin
     raise EArgumentHashLibException.CreateRes(@SInvalidConfigLength);
   end;
 
-  Fm_state[0] := IV0;
-  Fm_state[1] := IV1;
-  Fm_state[2] := IV2;
-  Fm_state[3] := IV3;
-  Fm_state[4] := IV4;
-  Fm_state[5] := IV5;
-  Fm_state[6] := IV6;
-  Fm_state[7] := IV7;
+  FState[0] := IV0;
+  FState[1] := IV1;
+  FState[2] := IV2;
+  FState[3] := IV3;
+  FState[4] := IV4;
+  FState[5] := IV5;
+  FState[6] := IV6;
+  FState[7] := IV7;
 
-  F_counter0 := 0;
-  F_counter1 := 0;
-  F_finalizationFlag0 := 0;
-  F_finalizationFlag1 := 0;
+  FCounter0 := 0;
+  FCounter1 := 0;
+  FFinalizationFlag0 := 0;
+  FFinalizationFlag1 := 0;
 
-  F_bufferFilled := 0;
+  FFilledBufferCount := 0;
 
-  System.SetLength(F_buf, BlockSizeInBytes);
+  TArrayUtils.ZeroFill(FBuffer);
 
-  for i := 0 to 7 do
+  System.FillChar(FM, System.SizeOf(FM), UInt64(0));
+
+{$IFNDEF USE_UNROLLED_VARIANT}
+  System.FillChar(FV, System.SizeOf(FV), UInt64(0));
+{$ENDIF USE_UNROLLED_VARIANT}
+  for LIdx := 0 to 7 do
   begin
-    Fm_state[i] := Fm_state[i] xor FrawConfig[i];
+    FState[LIdx] := FState[LIdx] xor LRawConfig[LIdx];
   end;
 
-  if (FKey <> Nil) then
+  if FDoTransformKeyBlock then
   begin
-
-    TransformBytes(FKey, 0, System.Length(FKey));
-
+    if (LBlock <> Nil) then
+    begin
+      TransformBytes(LBlock, 0, System.Length(LBlock));
+      TArrayUtils.ZeroFill(LBlock); // burn key from memory
+    end;
   end;
-
 end;
 
-procedure TBlake2B.TransformBytes(a_data: THashLibByteArray;
-  a_index, a_data_length: Int32);
+procedure TBlake2B.TransformBytes(const AData: THashLibByteArray;
+  AIndex, ADataLength: Int32);
 var
-  offset, bufferRemaining: Int32;
-
+  LOffset, LBufferRemaining: Int32;
+  LPtrData, LPtrBuffer: PByte;
 begin
-  offset := a_index;
-  bufferRemaining := BlockSizeInBytes - F_bufferFilled;
+  LOffset := AIndex;
+  LBufferRemaining := BlockSizeInBytes - FFilledBufferCount;
 
-  if ((F_bufferFilled > 0) and (a_data_length > bufferRemaining)) then
+  if ((FFilledBufferCount > 0) and (ADataLength > LBufferRemaining)) then
   begin
-
-    System.Move(a_data[offset], F_buf[F_bufferFilled], bufferRemaining);
-    F_counter0 := F_counter0 + BlockSizeInBytes;
-    if (F_counter0 = 0) then
+    if LBufferRemaining > 0 then
     begin
-      System.Inc(F_counter1);
+      System.Move(AData[LOffset], FBuffer[FFilledBufferCount],
+        LBufferRemaining);
     end;
-    Compress(PByte(F_buf), 0);
-    offset := offset + bufferRemaining;
-    a_data_length := a_data_length - bufferRemaining;
-    F_bufferFilled := 0;
+    Blake2BIncrementCounter(UInt64(BlockSizeInBytes));
+    LPtrBuffer := PByte(FBuffer);
+    Compress(LPtrBuffer, 0);
+    LOffset := LOffset + LBufferRemaining;
+    ADataLength := ADataLength - LBufferRemaining;
+    FFilledBufferCount := 0;
   end;
 
-  while (a_data_length > BlockSizeInBytes) do
+  LPtrData := PByte(AData);
+
+  while (ADataLength > BlockSizeInBytes) do
   begin
-    F_counter0 := F_counter0 + BlockSizeInBytes;
-    if (F_counter0 = 0) then
-    begin
-      System.Inc(F_counter1);
-    end;
-    Compress(PByte(a_data), offset);
-    offset := offset + BlockSizeInBytes;
-    a_data_length := a_data_length - BlockSizeInBytes;
+    Blake2BIncrementCounter(UInt64(BlockSizeInBytes));
+    Compress(LPtrData, LOffset);
+    LOffset := LOffset + BlockSizeInBytes;
+    ADataLength := ADataLength - BlockSizeInBytes;
   end;
 
-  if (a_data_length > 0) then
+  if (ADataLength > 0) then
   begin
-
-    System.Move(a_data[offset], F_buf[F_bufferFilled], a_data_length);
-
-    F_bufferFilled := F_bufferFilled + a_data_length;
-
+    System.Move(AData[LOffset], FBuffer[FFilledBufferCount], ADataLength);
+    FFilledBufferCount := FFilledBufferCount + ADataLength;
   end;
 end;
 
 function TBlake2B.TransformFinal: IHashResult;
 var
-  tempRes: THashLibByteArray;
+  LBuffer: THashLibByteArray;
+begin
+  Finish();
+  System.SetLength(LBuffer, HashSize);
+  TConverters.le64_copy(PUInt64(FState), 0, PByte(LBuffer), 0,
+    System.Length(LBuffer));
+  Result := THashResult.Create(LBuffer);
+  Initialize();
+end;
+
+function TBlake2B.GetName: String;
+begin
+  Result := Format('%s_%u', [Self.ClassName, Self.HashSize * 8]);
+end;
+
+{ TBlake2XBConfig }
+
+function TBlake2XBConfig.GetBlake2BConfig: IBlake2BConfig;
+begin
+  Result := FBlake2BConfig;
+end;
+
+function TBlake2XBConfig.GetBlake2BTreeConfig: IBlake2BTreeConfig;
+begin
+  Result := FBlake2BTreeConfig;
+end;
+
+procedure TBlake2XBConfig.SetBlake2BConfig(const AValue: IBlake2BConfig);
+begin
+  FBlake2BConfig := AValue;
+end;
+
+procedure TBlake2XBConfig.SetBlake2BTreeConfig(const AValue
+  : IBlake2BTreeConfig);
+begin
+  FBlake2BTreeConfig := AValue;
+end;
+
+function TBlake2XBConfig.Clone(): TBlake2XBConfig;
+begin
+  Result := Default (TBlake2XBConfig);
+  if FBlake2BConfig <> Nil then
+  begin
+    Result.Blake2BConfig := FBlake2BConfig.Clone();
+  end;
+
+  if FBlake2BTreeConfig <> Nil then
+  begin
+    Result.Blake2BTreeConfig := FBlake2BTreeConfig.Clone();
+  end;
+end;
+
+constructor TBlake2XBConfig.Create(ABlake2BConfig: IBlake2BConfig;
+  ABlake2BTreeConfig: IBlake2BTreeConfig);
+begin
+  FBlake2BConfig := ABlake2BConfig;
+  FBlake2BTreeConfig := ABlake2BTreeConfig;
+end;
+
+{ TBlake2XB }
+
+function TBlake2XB.GetXOFSizeInBits: UInt64;
+begin
+  Result := FXOFSizeInBits;
+end;
+
+procedure TBlake2XB.SetXOFSizeInBits(AXofSizeInBits: UInt64);
+begin
+  SetXOFSizeInBitsInternal(AXofSizeInBits);
+end;
+
+function TBlake2XB.SetXOFSizeInBitsInternal(AXofSizeInBits: UInt64): IXOF;
+var
+  LXofSizeInBytes: UInt64;
+begin
+  LXofSizeInBytes := AXofSizeInBits shr 3;
+  If ((AXofSizeInBits and $7) <> 0) or (LXofSizeInBytes < 1) or
+    (LXofSizeInBytes > UInt64(UnknownDigestLengthInBytes)) then
+  begin
+    raise EArgumentInvalidHashLibException.CreateResFmt(@SInvalidXOFSize,
+      [1, UInt64(UnknownDigestLengthInBytes)]);
+  end;
+  FXOFSizeInBits := AXofSizeInBits;
+  Result := Self;
+end;
+
+function TBlake2XB.NodeOffsetWithXOFDigestLength(AXOFSizeInBytes
+  : UInt64): UInt64;
+begin
+  Result := (UInt64(AXOFSizeInBytes) shl 32);
+end;
+
+function TBlake2XB.ComputeStepLength: Int32;
+var
+  LXofSizeInBytes, LDiff: UInt64;
+begin
+  LXofSizeInBytes := XOFSizeInBits shr 3;
+  LDiff := LXofSizeInBytes - FDigestPosition;
+  if (LXofSizeInBytes = UInt64(UnknownDigestLengthInBytes)) then
+  begin
+    Result := Blake2BHashSize;
+    Exit;
+  end;
+
+  // Math.Min
+  if UInt64(Blake2BHashSize) < LDiff then
+  begin
+    Result := UInt64(Blake2BHashSize)
+  end
+  else
+  begin
+    Result := LDiff;
+  end;
+end;
+
+function TBlake2XB.GetName: String;
+begin
+  Result := Self.ClassName;
+end;
+
+function TBlake2XB.Clone(): IHash;
+var
+  LHashInstance: TBlake2XB;
+  LXof: IXOF;
+begin
+  // Xof Cloning
+  LXof := (TBlake2XB.CreateInternal(FRootConfig.Blake2BConfig,
+    FRootConfig.Blake2BTreeConfig) as IXOF);
+  LXof.XOFSizeInBits := (Self as IXOF).XOFSizeInBits;
+
+  // Blake2XB Cloning
+  LHashInstance := LXof as TBlake2XB;
+  LHashInstance.FBlake2XBConfig := FBlake2XBConfig.Clone();
+  LHashInstance.FDigestPosition := FDigestPosition;
+  LHashInstance.FRootConfig := FRootConfig.Clone();
+  LHashInstance.FOutputConfig := FOutputConfig.Clone();
+  LHashInstance.FRootHashDigest := System.Copy(FRootHashDigest);
+  LHashInstance.FBlake2XBBuffer := System.Copy(FBlake2XBBuffer);
+  LHashInstance.FFinalized := FFinalized;
+
+  // Internal Blake2B Cloning
+  System.Move(FM, LHashInstance.FM, System.SizeOf(FM));
+  LHashInstance.FState := System.Copy(FState);
+  LHashInstance.FBuffer := System.Copy(FBuffer);
+{$IFNDEF USE_UNROLLED_VARIANT}
+  System.Move(FV, LHashInstance.FV, System.SizeOf(FV));
+{$ENDIF USE_UNROLLED_VARIANT}
+  LHashInstance.FFilledBufferCount := FFilledBufferCount;
+  LHashInstance.FCounter0 := FCounter0;
+  LHashInstance.FCounter1 := FCounter1;
+  LHashInstance.FFinalizationFlag0 := FFinalizationFlag0;
+  LHashInstance.FFinalizationFlag1 := FFinalizationFlag1;
+
+  Result := LHashInstance as IHash;
+  Result.BufferSize := BufferSize;
+end;
+
+constructor TBlake2XB.CreateInternal(const AConfig: IBlake2BConfig;
+  const ATreeConfig: IBlake2BTreeConfig);
+begin
+  inherited Create(AConfig, ATreeConfig);
+end;
+
+constructor TBlake2XB.Create(const ABlake2XBConfig: TBlake2XBConfig);
+begin
+  FBlake2XBConfig := ABlake2XBConfig;
+  // Create root hash config.
+  FRootConfig := Default (TBlake2XBConfig);
+
+  FRootConfig.Blake2BConfig := FBlake2XBConfig.Blake2BConfig;
+
+  if FRootConfig.Blake2BConfig = Nil then
+  begin
+    FRootConfig.Blake2BConfig := TBlake2BConfig.Create();
+  end
+  else
+  begin
+    FRootConfig.Blake2BConfig.Key := FBlake2XBConfig.Blake2BConfig.Key;
+    FRootConfig.Blake2BConfig.Salt := FBlake2XBConfig.Blake2BConfig.Salt;
+    FRootConfig.Blake2BConfig.Personalisation :=
+      FBlake2XBConfig.Blake2BConfig.Personalisation;
+  end;
+
+  FRootConfig.Blake2BTreeConfig := FBlake2XBConfig.Blake2BTreeConfig;
+
+  if FRootConfig.Blake2BTreeConfig = Nil then
+  begin
+    FRootConfig.Blake2BTreeConfig := TBlake2BTreeConfig.Create();
+    FRootConfig.Blake2BTreeConfig.FanOut := 1;
+    FRootConfig.Blake2BTreeConfig.MaxDepth := 1;
+
+    FRootConfig.Blake2BTreeConfig.LeafSize := 0;
+    FRootConfig.Blake2BTreeConfig.NodeOffset := 0;
+    FRootConfig.Blake2BTreeConfig.NodeDepth := 0;
+    FRootConfig.Blake2BTreeConfig.InnerHashSize := 0;
+    FRootConfig.Blake2BTreeConfig.IsLastNode := False;
+  end;
+
+  // Create initial config for output hashes.
+  FOutputConfig := Default (TBlake2XBConfig);
+
+  FOutputConfig.Blake2BConfig := TBlake2BConfig.Create();
+  FOutputConfig.Blake2BConfig.Salt := FRootConfig.Blake2BConfig.Salt;
+  FOutputConfig.Blake2BConfig.Personalisation :=
+    FRootConfig.Blake2BConfig.Personalisation;
+
+  FOutputConfig.Blake2BTreeConfig := TBlake2BTreeConfig.Create();
+
+  CreateInternal(FRootConfig.Blake2BConfig, FRootConfig.Blake2BTreeConfig);
+
+  System.SetLength(FBlake2XBBuffer, Blake2BHashSize);
+end;
+
+procedure TBlake2XB.Initialize;
+var
+  LXofSizeInBytes: UInt64;
+begin
+  LXofSizeInBytes := XOFSizeInBits shr 3;
+
+  FRootConfig.Blake2BTreeConfig.NodeOffset := NodeOffsetWithXOFDigestLength
+    (LXofSizeInBytes);
+
+  FOutputConfig.Blake2BTreeConfig.NodeOffset := NodeOffsetWithXOFDigestLength
+    (LXofSizeInBytes);
+
+  FRootHashDigest := Nil;
+  FDigestPosition := 0;
+  FFinalized := False;
+  TArrayUtils.ZeroFill(FBlake2XBBuffer);
+  inherited Initialize();
+end;
+
+procedure TBlake2XB.DoOutput(const ADestination: THashLibByteArray;
+  ADestinationOffset, AOutputLength: UInt64);
+var
+  LDiff, LCount, LBlockOffset: UInt64;
 begin
 
-  Finish();
+  if (UInt64(System.Length(ADestination)) - ADestinationOffset) < AOutputLength
+  then
+  begin
+    raise EArgumentOutOfRangeHashLibException.CreateRes(@SOutputBufferTooShort);
+  end;
 
-  System.SetLength(tempRes, FHashSize);
+  if ((XOFSizeInBits shr 3) <> UnknownDigestLengthInBytes) then
+  begin
+    if ((FDigestPosition + AOutputLength) > (XOFSizeInBits shr 3)) then
+    begin
+      raise EArgumentOutOfRangeHashLibException.CreateRes
+        (@SOutputLengthInvalid);
+    end;
+  end
+  else if (FDigestPosition = UnknownMaxDigestLengthInBytes) then
+  begin
+    raise EArgumentOutOfRangeHashLibException.CreateRes
+      (@SMaximumOutputLengthExceeded);
+  end;
 
-  TConverters.le64_copy(PUInt64(Fm_state), 0, PByte(tempRes), 0,
-    System.Length(tempRes));
+  if not FFinalized then
+  begin
+    Finish();
+    FFinalized := True;
+  end;
 
-  result := THashResult.Create(tempRes);
+  if (FRootHashDigest = Nil) then
+  begin
+    // Get root digest
+    System.SetLength(FRootHashDigest, Blake2BHashSize);
+    TConverters.le64_copy(PUInt64(FState), 0, PByte(FRootHashDigest), 0,
+      System.Length(FRootHashDigest));
+  end;
 
+  while AOutputLength > 0 do
+  begin
+    if (FDigestPosition and (Blake2BHashSize - 1)) = 0 then
+    begin
+      FOutputConfig.Blake2BConfig.HashSize := ComputeStepLength();
+      FOutputConfig.Blake2BTreeConfig.InnerHashSize := Blake2BHashSize;
+
+      FBlake2XBBuffer := (TBlake2B.Create(FOutputConfig.Blake2BConfig,
+        FOutputConfig.Blake2BTreeConfig) as IHash).ComputeBytes(FRootHashDigest)
+        .GetBytes();
+      FOutputConfig.Blake2BTreeConfig.NodeOffset :=
+        FOutputConfig.Blake2BTreeConfig.NodeOffset + 1;
+    end;
+
+    LBlockOffset := FDigestPosition and (Blake2BHashSize - 1);
+
+    LDiff := UInt64(System.Length(FBlake2XBBuffer)) - LBlockOffset;
+
+    // Math.Min
+    if AOutputLength < LDiff then
+    begin
+      LCount := AOutputLength
+    end
+    else
+    begin
+      LCount := LDiff;
+    end;
+
+    System.Move(FBlake2XBBuffer[LBlockOffset],
+      ADestination[ADestinationOffset], LCount);
+
+    System.Dec(AOutputLength, LCount);
+    System.Inc(ADestinationOffset, LCount);
+    System.Inc(FDigestPosition, LCount);
+  end;
+end;
+
+function TBlake2XB.GetResult: THashLibByteArray;
+var
+  LXofSizeInBytes: UInt64;
+begin
+  System.SetLength(Result, XOFSizeInBits shr 3);
+
+  LXofSizeInBytes := XOFSizeInBits shr 3;
+
+  System.SetLength(Result, LXofSizeInBytes);
+
+  DoOutput(Result, 0, LXofSizeInBytes);
+end;
+
+procedure TBlake2XB.TransformBytes(const AData: THashLibByteArray;
+  AIndex, ADataLength: Int32);
+begin
+  if FFinalized then
+  begin
+    raise EInvalidOperationHashLibException.CreateResFmt
+      (@SWritetoXofAfterReadError, [Name]);
+  end;
+  inherited TransformBytes(AData, AIndex, ADataLength);
+end;
+
+function TBlake2XB.TransformFinal: IHashResult;
+var
+  LBuffer: THashLibByteArray;
+begin
+  LBuffer := GetResult();
+{$IFDEF DEBUG}
+  System.Assert(UInt64(System.Length(LBuffer)) = (XOFSizeInBits shr 3));
+{$ENDIF DEBUG}
   Initialize();
+  Result := THashResult.Create(LBuffer);
+end;
 
+{ TBlake2BMACNotBuildInAdapter }
+
+procedure TBlake2BMACNotBuildInAdapter.Clear();
+begin
+  TArrayUtils.ZeroFill(FKey);
+end;
+
+function TBlake2BMACNotBuildInAdapter.Clone(): IHash;
+var
+  LHashInstance: TBlake2BMACNotBuildInAdapter;
+begin
+  LHashInstance := TBlake2BMACNotBuildInAdapter.Create(FHash.Clone(), FKey);
+  Result := LHashInstance as IHash;
+  Result.BufferSize := BufferSize;
+end;
+
+constructor TBlake2BMACNotBuildInAdapter.Create(const ABlake2BKey, ASalt,
+  APersonalisation: THashLibByteArray; AOutputLengthInBits: Int32);
+var
+  LConfig: IBlake2BConfig;
+begin
+  LConfig := TBlake2BConfig.Create(AOutputLengthInBits shr 3);
+  LConfig.Key := ABlake2BKey;
+  LConfig.Salt := ASalt;
+  LConfig.Personalisation := APersonalisation;
+  Create(TBlake2B.Create(LConfig, Nil) as IHash, ABlake2BKey);
+end;
+
+constructor TBlake2BMACNotBuildInAdapter.Create(const AHash: IHash;
+  const ABlake2BKey: THashLibByteArray);
+begin
+  Inherited Create(AHash.HashSize, AHash.BlockSize);
+  SetKey(ABlake2BKey);
+  FHash := AHash;
+end;
+
+class function TBlake2BMACNotBuildInAdapter.CreateBlake2BMAC(const ABlake2BKey,
+  ASalt, APersonalisation: THashLibByteArray; AOutputLengthInBits: Int32)
+  : IBlake2BMAC;
+begin
+  Result := TBlake2BMACNotBuildInAdapter.Create(ABlake2BKey, ASalt,
+    APersonalisation, AOutputLengthInBits) as IBlake2BMAC;
+end;
+
+destructor TBlake2BMACNotBuildInAdapter.Destroy;
+begin
+  Clear();
+  inherited Destroy;
+end;
+
+function TBlake2BMACNotBuildInAdapter.GetKey: THashLibByteArray;
+begin
+  Result := System.Copy(FKey);
+end;
+
+function TBlake2BMACNotBuildInAdapter.GetName: String;
+begin
+  Result := Format('%s', ['TBlake2BMAC']);
+end;
+
+procedure TBlake2BMACNotBuildInAdapter.Initialize;
+begin
+  FHash.Initialize;
+end;
+
+procedure TBlake2BMACNotBuildInAdapter.SetKey(const AValue: THashLibByteArray);
+begin
+  if (AValue = Nil) then
+  begin
+    FKey := Nil;
+  end
+  else
+  begin
+    FKey := System.Copy(AValue);
+  end;
+end;
+
+procedure TBlake2BMACNotBuildInAdapter.TransformBytes
+  (const AData: THashLibByteArray; AIndex, ALength: Int32);
+begin
+{$IFDEF DEBUG}
+  System.Assert(AIndex >= 0);
+  System.Assert(ALength >= 0);
+  System.Assert(AIndex + ALength <= System.Length(AData));
+{$ENDIF}
+  FHash.TransformBytes(AData, AIndex, ALength);
+end;
+
+function TBlake2BMACNotBuildInAdapter.TransformFinal: IHashResult;
+begin
+  Result := FHash.TransformFinal();
 end;
 
 end.

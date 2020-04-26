@@ -8,9 +8,7 @@ uses
   HlpHashLibTypes,
   HlpHash,
   HlpConverters,
-{$IFDEF DELPHI}
-  HlpBitConverter,
-{$ENDIF DELPHI}
+  HlpIHash,
   HlpIHashInfo,
   HlpHashResult,
   HlpIHashResult,
@@ -22,12 +20,11 @@ resourcestring
 
 type
 
-  TXXHash64 = class sealed(THash, IHash64, IBlockHash, IHashWithKey,
-    ITransformBlock)
+  TXXHash64 = class sealed(THash, IHash64, IHashWithKey, ITransformBlock)
 
   strict private
-
-    Fm_key, Fm_hash: UInt64;
+  var
+    FKey, FHash: UInt64;
 
   const
     CKEY = UInt64(0);
@@ -48,29 +45,33 @@ type
 {$ENDIF FPC}
     function GetKeyLength(): TNullableInteger;
     function GetKey: THashLibByteArray; inline;
-    procedure SetKey(value: THashLibByteArray); inline;
+    procedure SetKey(const AValue: THashLibByteArray); inline;
 
   type
 
     TXXH_State = record
 
     private
+    var
+      FTotalLength, FV1, FV2, FV3, FV4: UInt64;
+      FMemorySize: UInt32;
+      FMemory: THashLibByteArray;
 
-      total_len, v1, v2, v3, v4: UInt64;
-      memsize: UInt32;
-      memory: THashLibByteArray;
+      function Clone(): TXXH_State; inline;
 
     end;
 
   strict private
-    F_state: TXXH_State;
+  var
+    FState: TXXH_State;
 
   public
     constructor Create();
     procedure Initialize(); override;
-    procedure TransformBytes(a_data: THashLibByteArray;
-      a_index, a_length: Int32); override;
+    procedure TransformBytes(const AData: THashLibByteArray;
+      AIndex, ALength: Int32); override;
     function TransformFinal(): IHashResult; override;
+    function Clone(): IHash; override;
     property KeyLength: TNullableInteger read GetKeyLength;
     property Key: THashLibByteArray read GetKey write SetKey;
 
@@ -78,19 +79,44 @@ type
 
 implementation
 
+{ TXXHash64.TXXH_State }
+
+function TXXHash64.TXXH_State.Clone(): TXXH_State;
+begin
+  result := Default (TXXH_State);
+  result.FTotalLength := FTotalLength;
+  result.FMemorySize := FMemorySize;
+  result.FV1 := FV1;
+  result.FV2 := FV2;
+  result.FV3 := FV3;
+  result.FV4 := FV4;
+  result.FMemory := System.Copy(FMemory);
+end;
+
 { TXXHash64 }
+
+function TXXHash64.Clone(): IHash;
+var
+  LHashInstance: TXXHash64;
+begin
+  LHashInstance := TXXHash64.Create();
+  LHashInstance.FKey := FKey;
+  LHashInstance.FHash := FHash;
+  LHashInstance.FState := FState.Clone();
+  result := LHashInstance as IHash;
+  result.BufferSize := BufferSize;
+end;
 
 constructor TXXHash64.Create;
 begin
   Inherited Create(8, 32);
-  Fm_key := CKEY;
-  System.SetLength(F_state.memory, 32);
-
+  FKey := CKEY;
+  System.SetLength(FState.FMemory, 32);
 end;
 
 function TXXHash64.GetKey: THashLibByteArray;
 begin
-  result := TConverters.ReadUInt64AsBytesLE(Fm_key);
+  result := TConverters.ReadUInt64AsBytesLE(FKey);
 end;
 
 function TXXHash64.GetKeyLength: TNullableInteger;
@@ -100,184 +126,191 @@ end;
 
 procedure TXXHash64.Initialize;
 begin
-  Fm_hash := 0;
-  F_state.v1 := Fm_key + PRIME64_1 + PRIME64_2;
-  F_state.v2 := Fm_key + PRIME64_2;
-  F_state.v3 := Fm_key + 0;
-  F_state.v4 := Fm_key - PRIME64_1;
-  F_state.total_len := 0;
-  F_state.memsize := 0;
-
+  FHash := 0;
+  FState.FV1 := FKey + PRIME64_1 + PRIME64_2;
+  FState.FV2 := FKey + PRIME64_2;
+  FState.FV3 := FKey + 0;
+  FState.FV4 := FKey - PRIME64_1;
+  FState.FTotalLength := 0;
+  FState.FMemorySize := 0;
 end;
 
-procedure TXXHash64.SetKey(value: THashLibByteArray);
+procedure TXXHash64.SetKey(const AValue: THashLibByteArray);
 begin
-  if (value = Nil) then
+  if (AValue = Nil) then
   begin
-    Fm_key := CKEY;
+    FKey := CKEY;
   end
   else
   begin
-    if System.Length(value) <> KeyLength.value then
+    if System.Length(AValue) <> KeyLength.value then
+    begin
       raise EArgumentHashLibException.CreateResFmt(@SInvalidKeyLength,
         [KeyLength.value]);
-
-    Fm_key := TConverters.ReadBytesAsUInt64LE(PByte(value), 0);
+    end;
+    FKey := TConverters.ReadBytesAsUInt64LE(PByte(AValue), 0);
   end;
 end;
 
-procedure TXXHash64.TransformBytes(a_data: THashLibByteArray;
-  a_index, a_length: Int32);
+procedure TXXHash64.TransformBytes(const AData: THashLibByteArray;
+  AIndex, ALength: Int32);
 var
-  v1, v2, v3, v4: UInt64;
-  ptrLimit, ptrEnd, ptrBuffer, ptrTemp, ptrMemory: PByte;
+  LV1, LV2, LV3, LV4: UInt64;
+  LPtrLimit, LPtrEnd, LPtrADataStart, LPtrMemoryStart, LPtrMemory: PByte;
+  LPtrADataStartUInt64: PUInt64;
 begin
-
 {$IFDEF DEBUG}
-  System.Assert(a_index >= 0);
-  System.Assert(a_length >= 0);
-  System.Assert(a_index + a_length <= System.Length(a_data));
+  System.Assert(AIndex >= 0);
+  System.Assert(ALength >= 0);
+  System.Assert(AIndex + ALength <= System.Length(AData));
 {$ENDIF DEBUG}
-  ptrBuffer := @a_data[a_index];
-  ptrMemory := PByte(F_state.memory);
-  F_state.total_len := F_state.total_len + UInt64(a_length);
+  LPtrADataStart := PByte(AData) + AIndex;
+  LPtrMemory := PByte(FState.FMemory);
+  FState.FTotalLength := FState.FTotalLength + UInt64(ALength);
 
-  if ((F_state.memsize + UInt32(a_length)) < UInt32(32)) then
+  if ((FState.FMemorySize + UInt32(ALength)) < UInt32(32)) then
   begin
 
-    ptrTemp := PByte(F_state.memory) + F_state.memsize;
+    LPtrMemoryStart := PByte(FState.FMemory) + FState.FMemorySize;
 
-    System.Move(ptrBuffer^, ptrTemp^, a_length);
+    System.Move(LPtrADataStart^, LPtrMemoryStart^, ALength);
 
-    F_state.memsize := F_state.memsize + UInt32(a_length);
+    FState.FMemorySize := FState.FMemorySize + UInt32(ALength);
     Exit;
   end;
 
-  ptrEnd := ptrBuffer + UInt32(a_length);
+  LPtrEnd := LPtrADataStart + UInt32(ALength);
 
-  if F_state.memsize > 0 then
+  if FState.FMemorySize > 0 then
   begin
-    ptrTemp := PByte(F_state.memory) + F_state.memsize;
-    System.Move(ptrBuffer^, ptrTemp^, 32 - F_state.memsize);
+    LPtrMemoryStart := PByte(FState.FMemory) + FState.FMemorySize;
+    System.Move(LPtrADataStart^, LPtrMemoryStart^, 32 - FState.FMemorySize);
 
-    F_state.v1 := PRIME64_1 * TBits.RotateLeft64(F_state.v1 + PRIME64_2 *
-      TConverters.ReadBytesAsUInt64LE(ptrMemory, 0), 31);
-    F_state.v2 := PRIME64_1 * TBits.RotateLeft64(F_state.v2 + PRIME64_2 *
-      TConverters.ReadBytesAsUInt64LE(ptrMemory, 8), 31);
-    F_state.v3 := PRIME64_1 * TBits.RotateLeft64(F_state.v3 + PRIME64_2 *
-      TConverters.ReadBytesAsUInt64LE(ptrMemory, 16), 31);
-    F_state.v4 := PRIME64_1 * TBits.RotateLeft64(F_state.v4 + PRIME64_2 *
-      TConverters.ReadBytesAsUInt64LE(ptrMemory, 24), 31);
+    FState.FV1 := PRIME64_1 * TBits.RotateLeft64(FState.FV1 + PRIME64_2 *
+      TConverters.ReadBytesAsUInt64LE(LPtrMemory, 0), 31);
+    FState.FV2 := PRIME64_1 * TBits.RotateLeft64(FState.FV2 + PRIME64_2 *
+      TConverters.ReadBytesAsUInt64LE(LPtrMemory, 8), 31);
+    FState.FV3 := PRIME64_1 * TBits.RotateLeft64(FState.FV3 + PRIME64_2 *
+      TConverters.ReadBytesAsUInt64LE(LPtrMemory, 16), 31);
+    FState.FV4 := PRIME64_1 * TBits.RotateLeft64(FState.FV4 + PRIME64_2 *
+      TConverters.ReadBytesAsUInt64LE(LPtrMemory, 24), 31);
 
-    ptrBuffer := ptrBuffer + (32 - F_state.memsize);
-    F_state.memsize := 0;
+    LPtrADataStart := LPtrADataStart + (32 - FState.FMemorySize);
+    FState.FMemorySize := 0;
   end;
 
-  if ptrBuffer <= (ptrEnd - 32) then
+  if LPtrADataStart <= (LPtrEnd - 32) then
   begin
-    v1 := F_state.v1;
-    v2 := F_state.v2;
-    v3 := F_state.v3;
-    v4 := F_state.v4;
+    LV1 := FState.FV1;
+    LV2 := FState.FV2;
+    LV3 := FState.FV3;
+    LV4 := FState.FV4;
 
-    ptrLimit := ptrEnd - 32;
+    LPtrLimit := LPtrEnd - 32;
     repeat
 
-      v1 := PRIME64_1 * TBits.RotateLeft64
-        (v1 + PRIME64_2 * TConverters.ReadBytesAsUInt64LE(ptrBuffer, 0), 31);
-      v2 := PRIME64_1 * TBits.RotateLeft64
-        (v2 + PRIME64_2 * TConverters.ReadBytesAsUInt64LE(ptrBuffer, 8), 31);
-      v3 := PRIME64_1 * TBits.RotateLeft64
-        (v3 + PRIME64_2 * TConverters.ReadBytesAsUInt64LE(ptrBuffer, 16), 31);
-      v4 := PRIME64_1 * TBits.RotateLeft64
-        (v4 + PRIME64_2 * TConverters.ReadBytesAsUInt64LE(ptrBuffer, 24), 31);
+      LPtrADataStartUInt64 := PUInt64(LPtrADataStart);
 
-      System.Inc(ptrBuffer, 32);
-    until not(ptrBuffer <= ptrLimit);
+      LV1 := PRIME64_1 * TBits.RotateLeft64
+        (LV1 + PRIME64_2 * TConverters.ReadPUInt64AsUInt64LE
+        (LPtrADataStartUInt64), 31);
+      LV2 := PRIME64_1 * TBits.RotateLeft64
+        (LV2 + PRIME64_2 * TConverters.ReadPUInt64AsUInt64LE
+        (LPtrADataStartUInt64 + 1), 31);
+      LV3 := PRIME64_1 * TBits.RotateLeft64
+        (LV3 + PRIME64_2 * TConverters.ReadPUInt64AsUInt64LE
+        (LPtrADataStartUInt64 + 2), 31);
+      LV4 := PRIME64_1 * TBits.RotateLeft64
+        (LV4 + PRIME64_2 * TConverters.ReadPUInt64AsUInt64LE
+        (LPtrADataStartUInt64 + 3), 31);
 
-    F_state.v1 := v1;
-    F_state.v2 := v2;
-    F_state.v3 := v3;
-    F_state.v4 := v4;
+      System.Inc(LPtrADataStart, 32);
+
+    until not(LPtrADataStart <= LPtrLimit);
+
+    FState.FV1 := LV1;
+    FState.FV2 := LV2;
+    FState.FV3 := LV3;
+    FState.FV4 := LV4;
   end;
 
-  if ptrBuffer < ptrEnd then
+  if LPtrADataStart < LPtrEnd then
   begin
-    ptrTemp := PByte(F_state.memory);
-    System.Move(ptrBuffer^, ptrTemp^, ptrEnd - ptrBuffer);
-    F_state.memsize := ptrEnd - ptrBuffer;
+    LPtrMemoryStart := PByte(FState.FMemory);
+    System.Move(LPtrADataStart^, LPtrMemoryStart^, LPtrEnd - LPtrADataStart);
+    FState.FMemorySize := LPtrEnd - LPtrADataStart;
   end;
-
 end;
 
 function TXXHash64.TransformFinal: IHashResult;
 var
-  v1, v2, v3, v4: UInt64;
-  ptrEnd, ptrBuffer: PByte;
+  LV1, LV2, LV3, LV4: UInt64;
+  LPtrEnd, LPtrBuffer: PByte;
 begin
 
-  if F_state.total_len >= UInt64(32) then
+  if FState.FTotalLength >= UInt64(32) then
   begin
-    v1 := F_state.v1;
-    v2 := F_state.v2;
-    v3 := F_state.v3;
-    v4 := F_state.v4;
+    LV1 := FState.FV1;
+    LV2 := FState.FV2;
+    LV3 := FState.FV3;
+    LV4 := FState.FV4;
 
-    Fm_hash := TBits.RotateLeft64(v1, 1) + TBits.RotateLeft64(v2, 7) +
-      TBits.RotateLeft64(v3, 12) + TBits.RotateLeft64(v4, 18);
+    FHash := TBits.RotateLeft64(LV1, 1) + TBits.RotateLeft64(LV2, 7) +
+      TBits.RotateLeft64(LV3, 12) + TBits.RotateLeft64(LV4, 18);
 
-    v1 := TBits.RotateLeft64(v1 * PRIME64_2, 31) * PRIME64_1;
-    Fm_hash := (Fm_hash xor v1) * PRIME64_1 + PRIME64_4;
+    LV1 := TBits.RotateLeft64(LV1 * PRIME64_2, 31) * PRIME64_1;
+    FHash := (FHash xor LV1) * PRIME64_1 + PRIME64_4;
 
-    v2 := TBits.RotateLeft64(v2 * PRIME64_2, 31) * PRIME64_1;
-    Fm_hash := (Fm_hash xor v2) * PRIME64_1 + PRIME64_4;
+    LV2 := TBits.RotateLeft64(LV2 * PRIME64_2, 31) * PRIME64_1;
+    FHash := (FHash xor LV2) * PRIME64_1 + PRIME64_4;
 
-    v3 := TBits.RotateLeft64(v3 * PRIME64_2, 31) * PRIME64_1;
-    Fm_hash := (Fm_hash xor v3) * PRIME64_1 + PRIME64_4;
+    LV3 := TBits.RotateLeft64(LV3 * PRIME64_2, 31) * PRIME64_1;
+    FHash := (FHash xor LV3) * PRIME64_1 + PRIME64_4;
 
-    v4 := TBits.RotateLeft64(v4 * PRIME64_2, 31) * PRIME64_1;
-    Fm_hash := (Fm_hash xor v4) * PRIME64_1 + PRIME64_4;
+    LV4 := TBits.RotateLeft64(LV4 * PRIME64_2, 31) * PRIME64_1;
+    FHash := (FHash xor LV4) * PRIME64_1 + PRIME64_4;
   end
   else
-    Fm_hash := Fm_key + PRIME64_5;
-
-  System.Inc(Fm_hash, F_state.total_len);
-
-  ptrBuffer := PByte(F_state.memory);
-  ptrEnd := ptrBuffer + F_state.memsize;
-
-  while (ptrBuffer + 8) <= ptrEnd do
   begin
-    Fm_hash := Fm_hash xor (PRIME64_1 * TBits.RotateLeft64(PRIME64_2 *
-      TConverters.ReadBytesAsUInt64LE(ptrBuffer, 0), 31));
-    Fm_hash := TBits.RotateLeft64(Fm_hash, 27) * PRIME64_1 + PRIME64_4;
-    System.Inc(ptrBuffer, 8);
+    FHash := FKey + PRIME64_5;
   end;
 
-  if (ptrBuffer + 4) <= ptrEnd then
+  System.Inc(FHash, FState.FTotalLength);
+
+  LPtrBuffer := PByte(FState.FMemory);
+  LPtrEnd := LPtrBuffer + FState.FMemorySize;
+
+  while (LPtrBuffer + 8) <= LPtrEnd do
   begin
-    Fm_hash := Fm_hash xor TConverters.ReadBytesAsUInt32LE(ptrBuffer, 0) *
+    FHash := FHash xor (PRIME64_1 * TBits.RotateLeft64(PRIME64_2 *
+      TConverters.ReadBytesAsUInt64LE(LPtrBuffer, 0), 31));
+    FHash := TBits.RotateLeft64(FHash, 27) * PRIME64_1 + PRIME64_4;
+    System.Inc(LPtrBuffer, 8);
+  end;
+
+  if (LPtrBuffer + 4) <= LPtrEnd then
+  begin
+    FHash := FHash xor TConverters.ReadBytesAsUInt32LE(LPtrBuffer, 0) *
       PRIME64_1;
-    Fm_hash := TBits.RotateLeft64(Fm_hash, 23) * PRIME64_2 + PRIME64_3;
-    System.Inc(ptrBuffer, 4);
+    FHash := TBits.RotateLeft64(FHash, 23) * PRIME64_2 + PRIME64_3;
+    System.Inc(LPtrBuffer, 4);
   end;
 
-  while ptrBuffer < ptrEnd do
+  while LPtrBuffer < LPtrEnd do
   begin
-    Fm_hash := Fm_hash xor ptrBuffer^ * PRIME64_5;
-    Fm_hash := TBits.RotateLeft64(Fm_hash, 11) * PRIME64_1;
-    System.Inc(ptrBuffer);
+    FHash := FHash xor LPtrBuffer^ * PRIME64_5;
+    FHash := TBits.RotateLeft64(FHash, 11) * PRIME64_1;
+    System.Inc(LPtrBuffer);
   end;
 
-  Fm_hash := Fm_hash xor (Fm_hash shr 33);
-  Fm_hash := Fm_hash * PRIME64_2;
-  Fm_hash := Fm_hash xor (Fm_hash shr 29);
-  Fm_hash := Fm_hash * PRIME64_3;
-  Fm_hash := Fm_hash xor (Fm_hash shr 32);
+  FHash := FHash xor (FHash shr 33);
+  FHash := FHash * PRIME64_2;
+  FHash := FHash xor (FHash shr 29);
+  FHash := FHash * PRIME64_3;
+  FHash := FHash xor (FHash shr 32);
 
-  result := THashResult.Create(Fm_hash);
+  result := THashResult.Create(FHash);
   Initialize();
-
 end;
 
 end.

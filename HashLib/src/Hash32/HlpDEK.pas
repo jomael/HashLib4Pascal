@@ -6,7 +6,11 @@ interface
 
 uses
   HlpHashLibTypes,
+{$IFDEF DELPHI}
+  HlpHash,
+{$ENDIF DELPHI}
   HlpBits,
+  HlpIHash,
   HlpIHashInfo,
   HlpHashResult,
   HlpIHashResult,
@@ -17,10 +21,11 @@ type
   TDEK = class sealed(TMultipleTransformNonBlock, IHash32, ITransformBlock)
 
   strict protected
-    function ComputeAggregatedBytes(a_data: THashLibByteArray)
+    function ComputeAggregatedBytes(const AData: THashLibByteArray)
       : IHashResult; override;
   public
     constructor Create();
+    function Clone(): IHash; override;
 
   end;
 
@@ -33,19 +38,29 @@ begin
   Inherited Create(4, 1);
 end;
 
-function TDEK.ComputeAggregatedBytes(a_data: THashLibByteArray): IHashResult;
+function TDEK.Clone(): IHash;
 var
-  hash: UInt32;
-  i: Int32;
+  LHashInstance: TDEK;
 begin
-  hash := UInt32(System.Length(a_data));
-  for i := 0 to System.Length(a_data) - 1 do
+  LHashInstance := TDEK.Create();
+  FBuffer.Position := 0;
+  LHashInstance.FBuffer.CopyFrom(FBuffer, FBuffer.Size);
+  result := LHashInstance as IHash;
+  result.BufferSize := BufferSize;
+end;
+
+function TDEK.ComputeAggregatedBytes(const AData: THashLibByteArray)
+  : IHashResult;
+var
+  LHash: UInt32;
+  LIdx: Int32;
+begin
+  LHash := UInt32(System.Length(AData));
+  for LIdx := 0 to System.Length(AData) - 1 do
   begin
-
-    hash := TBits.RotateLeft32(hash, 5) xor a_data[i];
+    LHash := TBits.RotateLeft32(LHash, 5) xor AData[LIdx];
   end;
-
-  result := THashResult.Create(hash);
+  result := THashResult.Create(LHash);
 end;
 
 end.

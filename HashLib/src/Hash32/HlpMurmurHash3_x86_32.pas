@@ -9,13 +9,11 @@ uses
   SysUtils, // to get rid of compiler hint "not inlined" on Delphi 2010.
 {$ENDIF DELPHI2010}
   HlpHashLibTypes,
-{$IFDEF DELPHI}
-  HlpBitConverter,
-{$ENDIF DELPHI}
   HlpConverters,
   HlpIHashInfo,
   HlpNullable,
   HlpHash,
+  HlpIHash,
   HlpHashResult,
   HlpIHashResult,
   HlpBits;
@@ -29,13 +27,12 @@ type
     ITransformBlock)
 
   strict private
+  var
+    FKey, FH, FTotalLength: UInt32;
+    FIdx: Int32;
+    FBuffer: THashLibByteArray;
 
-    Fm_key, Fm_h, Fm_total_length: UInt32;
-    Fm_idx: Int32;
-    Fm_buf: THashLibByteArray;
-
-    procedure TransformUInt32Fast(a_data: UInt32); inline;
-    procedure ByteUpdate(a_b: Byte); inline;
+    procedure ByteUpdate(AByte: Byte); inline;
     procedure Finish();
 
   const
@@ -49,14 +46,15 @@ type
 
     function GetKeyLength(): TNullableInteger;
     function GetKey: THashLibByteArray; inline;
-    procedure SetKey(value: THashLibByteArray); inline;
+    procedure SetKey(const AValue: THashLibByteArray); inline;
 
   public
     constructor Create();
     procedure Initialize(); override;
-    procedure TransformBytes(a_data: THashLibByteArray;
-      a_index, a_length: Int32); override;
+    procedure TransformBytes(const AData: THashLibByteArray;
+      AIndex, ALength: Int32); override;
     function TransformFinal: IHashResult; override;
+    function Clone(): IHash; override;
     property KeyLength: TNullableInteger read GetKeyLength;
     property Key: THashLibByteArray read GetKey write SetKey;
 
@@ -66,58 +64,70 @@ implementation
 
 { TMurmurHash3_x86_32 }
 
+function TMurmurHash3_x86_32.Clone(): IHash;
+var
+  LHashInstance: TMurmurHash3_x86_32;
+begin
+  LHashInstance := TMurmurHash3_x86_32.Create();
+  LHashInstance.FKey := FKey;
+  LHashInstance.FH := FH;
+  LHashInstance.FTotalLength := FTotalLength;
+  LHashInstance.FIdx := FIdx;
+  LHashInstance.FBuffer := System.Copy(FBuffer);
+  result := LHashInstance as IHash;
+  result.BufferSize := BufferSize;
+end;
+
 constructor TMurmurHash3_x86_32.Create;
 begin
   Inherited Create(4, 4);
-  Fm_key := CKEY;
-  System.SetLength(Fm_buf, 4);
-
+  FKey := CKEY;
+  System.SetLength(FBuffer, 4);
 end;
 
 procedure TMurmurHash3_x86_32.Finish;
 var
-  k: UInt32;
+  LFinalBlock: UInt32;
 begin
 
   // tail
 
-  k := 0;
+  LFinalBlock := 0;
 
-  if (Fm_idx <> 0) then
+  if (FIdx <> 0) then
   begin
 
-    case (Fm_idx) of
-
+    case (FIdx) of
       3:
         begin
-          k := k xor (Fm_buf[2] shl 16);
-          k := k xor (Fm_buf[1] shl 8);
-          k := k xor Fm_buf[0];
-          k := k * C1;
-          k := TBits.RotateLeft32(k, 15);
-          k := k * C2;
-          Fm_h := Fm_h xor k;
+          LFinalBlock := LFinalBlock xor (FBuffer[2] shl 16);
+          LFinalBlock := LFinalBlock xor (FBuffer[1] shl 8);
+          LFinalBlock := LFinalBlock xor FBuffer[0];
+          LFinalBlock := LFinalBlock * C1;
+          LFinalBlock := TBits.RotateLeft32(LFinalBlock, 15);
+          LFinalBlock := LFinalBlock * C2;
+          FH := FH xor LFinalBlock;
 
         end;
       2:
         begin
 
-          k := k xor (Fm_buf[1] shl 8);
-          k := k xor Fm_buf[0];
-          k := k * C1;
-          k := TBits.RotateLeft32(k, 15);
-          k := k * C2;
-          Fm_h := Fm_h xor k;
+          LFinalBlock := LFinalBlock xor (FBuffer[1] shl 8);
+          LFinalBlock := LFinalBlock xor FBuffer[0];
+          LFinalBlock := LFinalBlock * C1;
+          LFinalBlock := TBits.RotateLeft32(LFinalBlock, 15);
+          LFinalBlock := LFinalBlock * C2;
+          FH := FH xor LFinalBlock;
 
         end;
       1:
         begin
 
-          k := k xor Fm_buf[0];
-          k := k * C1;
-          k := TBits.RotateLeft32(k, 15);
-          k := k * C2;
-          Fm_h := Fm_h xor k;
+          LFinalBlock := LFinalBlock xor FBuffer[0];
+          LFinalBlock := LFinalBlock * C1;
+          LFinalBlock := TBits.RotateLeft32(LFinalBlock, 15);
+          LFinalBlock := LFinalBlock * C2;
+          FH := FH xor LFinalBlock;
 
         end;
     end;
@@ -125,65 +135,58 @@ begin
 
   // finalization
 
-  Fm_h := Fm_h xor Fm_total_length;
+  FH := FH xor FTotalLength;
 
-  Fm_h := Fm_h xor (Fm_h shr 16);
-  Fm_h := Fm_h * C4;
-  Fm_h := Fm_h xor (Fm_h shr 13);
-  Fm_h := Fm_h * C5;
-  Fm_h := Fm_h xor (Fm_h shr 16);
+  FH := FH xor (FH shr 16);
+  FH := FH * C4;
+  FH := FH xor (FH shr 13);
+  FH := FH * C5;
+  FH := FH xor (FH shr 16);
 end;
 
-procedure TMurmurHash3_x86_32.TransformUInt32Fast(a_data: UInt32);
+procedure TMurmurHash3_x86_32.ByteUpdate(AByte: Byte);
 var
-  k: UInt32;
+  LPtrBuffer: PByte;
+  LBlock: UInt32;
 begin
-  k := a_data;
-
-  k := k * C1;
-  k := TBits.RotateLeft32(k, 15);
-  k := k * C2;
-
-  Fm_h := Fm_h xor k;
-  Fm_h := TBits.RotateLeft32(Fm_h, 13);
-  Fm_h := (Fm_h * 5) + C3;
-end;
-
-procedure TMurmurHash3_x86_32.ByteUpdate(a_b: Byte);
-var
-  k: UInt32;
-  ptr_Fm_buf: PByte;
-begin
-
-  Fm_buf[Fm_idx] := a_b;
-  System.Inc(Fm_idx);
-  if Fm_idx >= 4 then
+  FBuffer[FIdx] := AByte;
+  System.Inc(FIdx);
+  if FIdx >= 4 then
   begin
-    ptr_Fm_buf := PByte(Fm_buf);
-    k := TConverters.ReadBytesAsUInt32LE(ptr_Fm_buf, 0);
-    TransformUInt32Fast(k);
-    Fm_idx := 0;
-  end;
+    LPtrBuffer := PByte(FBuffer);
+    LBlock := TConverters.ReadBytesAsUInt32LE(LPtrBuffer, 0);
 
+    LBlock := LBlock * C1;
+    LBlock := TBits.RotateLeft32(LBlock, 15);
+    LBlock := LBlock * C2;
+
+    FH := FH xor LBlock;
+    FH := TBits.RotateLeft32(FH, 13);
+    FH := (FH * 5) + C3;
+
+    FIdx := 0;
+  end;
 end;
 
 function TMurmurHash3_x86_32.GetKey: THashLibByteArray;
 begin
-  result := TConverters.ReadUInt32AsBytesLE(Fm_key);
+  result := TConverters.ReadUInt32AsBytesLE(FKey);
 end;
 
-procedure TMurmurHash3_x86_32.SetKey(value: THashLibByteArray);
+procedure TMurmurHash3_x86_32.SetKey(const AValue: THashLibByteArray);
 begin
-  if (value = Nil) then
+  if (AValue = Nil) then
   begin
-    Fm_key := CKEY;
+    FKey := CKEY;
   end
   else
   begin
-    if System.Length(value) <> KeyLength.value then
+    if System.Length(AValue) <> KeyLength.value then
+    begin
       raise EArgumentHashLibException.CreateResFmt(@SInvalidKeyLength,
         [KeyLength.value]);
-    Fm_key := TConverters.ReadBytesAsUInt32LE(PByte(value), 0);
+    end;
+    FKey := TConverters.ReadBytesAsUInt32LE(PByte(AValue), 0);
   end;
 end;
 
@@ -194,59 +197,117 @@ end;
 
 procedure TMurmurHash3_x86_32.Initialize;
 begin
-  Fm_h := Fm_key;
-  Fm_total_length := 0;
-  Fm_idx := 0;
+  FH := FKey;
+  FTotalLength := 0;
+  FIdx := 0;
 end;
 
-procedure TMurmurHash3_x86_32.TransformBytes(a_data: THashLibByteArray;
-  a_index, a_length: Int32);
+procedure TMurmurHash3_x86_32.TransformBytes(const AData: THashLibByteArray;
+  AIndex, ALength: Int32);
 var
-  len, nBlocks, i, offset: Int32;
-  k: UInt32;
-  ptr_a_data: PByte;
-
+  LLength, LNBlocks, LIdx, LOffset: Int32;
+  LBlock, LH: UInt32;
+  LPtrData, LPtrBuffer: PByte;
+  LPtrDataCardinal: PCardinal;
 begin
 {$IFDEF DEBUG}
-  System.Assert(a_index >= 0);
-  System.Assert(a_length >= 0);
-  System.Assert(a_index + a_length <= System.Length(a_data));
+  System.Assert(AIndex >= 0);
+  System.Assert(ALength >= 0);
+  System.Assert(AIndex + ALength <= System.Length(AData));
 {$ENDIF DEBUG}
-  len := a_length;
-  i := a_index;
-  ptr_a_data := PByte(a_data);
-  nBlocks := len shr 2;
+  LLength := ALength;
+  LIdx := AIndex;
+  LPtrData := PByte(AData);
+  System.Inc(FTotalLength, LLength);
 
+  // consume last pending bytes
+
+  if ((FIdx <> 0) and (ALength <> 0)) then
+  begin
+    { *                       buf    data
+      idx = 1, len = 3 -> [0, 1[ + [0, 3[ => Block = [], buf []
+      idx = 1, len = 4 -> [0, 1[ + [0, 3[ => Block = [], buf = data[3, 4[
+      idx = 1, len = 5 -> [0, 1[ + [0, 3[ => Block = [], buf = data[3, 5[
+      ...
+      idx = 1, len = 7 -> [0, 1[ + [0, 3[ => Block = [3,7[, buf []
+      idx = 2, len = 3 -> [0, 2[ + [0, 2[ => Block = [], buf [2, 3[
+      idx = 2, len = 4 -> [0, 2[ + [0, 2[ => Block = [], buf [2, 4[
+      ...
+      idx = 2, len = 6 -> [0, 2[ + [0, 2[ => Block = [2,6[, buf []
+      * }
+{$IFDEF DEBUG}
+    System.Assert(AIndex = 0); // nothing would work anyways if AIndex is !=0
+{$ENDIF DEBUG}
+    while ((FIdx < 4) and (LLength <> 0)) do
+    begin
+      FBuffer[FIdx] := (LPtrData + AIndex)^;
+      System.Inc(FIdx);
+      System.Inc(AIndex);
+      System.Dec(LLength);
+    end;
+    if (FIdx = 4) then
+    begin
+      LPtrBuffer := PByte(FBuffer);
+      LBlock := TConverters.ReadBytesAsUInt32LE(LPtrBuffer, 0);
+
+      LBlock := LBlock * C1;
+      LBlock := TBits.RotateLeft32(LBlock, 15);
+      LBlock := LBlock * C2;
+
+      FH := FH xor LBlock;
+      FH := TBits.RotateLeft32(FH, 13);
+      FH := (FH * 5) + C3;
+
+      FIdx := 0;
+    end;
+  end
+  else
+  begin
+    LIdx := 0;
+  end;
+
+  LNBlocks := LLength shr 2;
 
   // body
 
-  while i < nBlocks do
+  LH := FH;
+  LPtrDataCardinal := PCardinal(LPtrData + AIndex);
+  while LIdx < LNBlocks do
   begin
-    k := TConverters.ReadBytesAsUInt32LE(ptr_a_data, a_index + i * 4);
+    LBlock := TConverters.ReadPCardinalAsUInt32LE(LPtrDataCardinal + LIdx);
 
-    TransformUInt32Fast(k);
+    LBlock := LBlock * C1;
+    LBlock := TBits.RotateLeft32(LBlock, 15);
+    LBlock := LBlock * C2;
 
-    System.Inc(i);
+    LH := LH xor LBlock;
+    LH := TBits.RotateLeft32(LH, 13);
+    LH := (LH * 5) + C3;
+
+    System.Inc(LIdx);
   end;
 
-  System.Inc(Fm_total_length, len);
+  FH := LH;
 
-  offset := (i * 4);
-
-  while offset < len do
+  // save pending end bytes
+  LOffset := AIndex + (LIdx * 4);
+  while LOffset < (LLength + AIndex) do
   begin
-
-    ByteUpdate(a_data[offset]);
-    System.Inc(offset);
-
+    ByteUpdate(AData[LOffset]);
+    System.Inc(LOffset);
   end;
-
 end;
 
 function TMurmurHash3_x86_32.TransformFinal: IHashResult;
+var
+  LBufferBytes: THashLibByteArray;
 begin
   Finish();
-  result := THashResult.Create(Fm_h);
+
+  System.SetLength(LBufferBytes, HashSize);
+  TConverters.ReadUInt32AsBytesBE(FH, LBufferBytes, 0);
+
+  result := THashResult.Create(LBufferBytes);
   Initialize();
 end;
 

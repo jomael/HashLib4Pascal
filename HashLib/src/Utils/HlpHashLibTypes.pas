@@ -5,12 +5,7 @@ unit HlpHashLibTypes;
 interface
 
 uses
-
-{$IFDEF HAS_UNITSCOPE}
-  System.SysUtils
-{$ELSE}
-    SysUtils
-{$ENDIF HAS_UNITSCOPE};
+  SysUtils;
 
 type
 
@@ -21,22 +16,17 @@ type
   EInvalidOperationHashLibException = class(EHashLibException);
   EIndexOutOfRangeHashLibException = class(EHashLibException);
   EArgumentHashLibException = class(EHashLibException);
+  EArgumentInvalidHashLibException = class(EHashLibException);
   EArgumentNilHashLibException = class(EHashLibException);
   EArgumentOutOfRangeHashLibException = class(EHashLibException);
   ENullReferenceHashLibException = class(EHashLibException);
+  ENotImplementedHashLibException = class(EHashLibException);
   EUnsupportedTypeHashLibException = class(EHashLibException);
 
-{$IFDEF HAS_UNITSCOPE}
   /// <summary>
   /// Represents a dynamic array of Byte.
   /// </summary>
-  THashLibByteArray = System.SysUtils.TBytes
-{$ELSE}
-  /// <summary>
-  /// Represents a dynamic array of Byte.
-  /// </summary>
-    THashLibByteArray = TBytes
-{$ENDIF HAS_UNITSCOPE};
+  THashLibByteArray = TBytes;
 
   /// <summary>
   /// Represents a dynamic generic array of Type T.
@@ -70,6 +60,11 @@ type
   THashLibCharArray = TArray<Char>;
 
   /// <summary>
+  /// Represents a dynamic array of array of Byte.
+  /// </summary>
+  THashLibMatrixByteArray = TArray<THashLibByteArray>;
+
+  /// <summary>
   /// Represents a dynamic array of array of UInt32.
   /// </summary>
   THashLibMatrixUInt32Array = TArray<THashLibUInt32Array>;
@@ -101,6 +96,11 @@ type
   THashLibCharArray = array of Char;
 
   /// <summary>
+  /// Represents a dynamic array of array of Byte.
+  /// </summary>
+  THashLibMatrixByteArray = array of THashLibByteArray;
+
+  /// <summary>
   /// Represents a dynamic array of array of UInt32.
   /// </summary>
   THashLibMatrixUInt32Array = array of THashLibUInt32Array;
@@ -112,5 +112,15 @@ type
 {$ENDIF DELPHIXE_UP}
 
 implementation
+
+{$IFDEF FPC}
+
+initialization
+
+// Set UTF-8 in AnsiStrings, just like Lazarus
+SetMultiByteConversionCodePage(CP_UTF8);
+// SetMultiByteFileSystemCodePage(CP_UTF8); not needed, this is the default under Windows
+SetMultiByteRTLFileSystemCodePage(CP_UTF8);
+{$ENDIF FPC}
 
 end.

@@ -7,15 +7,16 @@ interface
 uses
   HlpHashLibTypes,
   HlpHash,
+  HlpIHash,
   HlpIHashInfo,
   HlpHashResult,
   HlpIHashResult;
 
 type
-  TRS = class sealed(THash, IHash32, IBlockHash, ITransformBlock)
+  TRS = class sealed(THash, IHash32, ITransformBlock)
   strict private
-
-    Fm_hash, Fm_a: UInt32;
+  var
+    FHash, FA: UInt32;
 
   const
     B = UInt32(378551);
@@ -23,14 +24,26 @@ type
   public
     constructor Create();
     procedure Initialize(); override;
-    procedure TransformBytes(a_data: THashLibByteArray;
-      a_index, a_length: Int32); override;
+    procedure TransformBytes(const AData: THashLibByteArray;
+      AIndex, ALength: Int32); override;
     function TransformFinal(): IHashResult; override;
+    function Clone(): IHash; override;
   end;
 
 implementation
 
 { TRS }
+
+function TRS.Clone(): IHash;
+var
+  LHashInstance: TRS;
+begin
+  LHashInstance := TRS.Create();
+  LHashInstance.FHash := FHash;
+  LHashInstance.FA := FA;
+  result := LHashInstance as IHash;
+  result.BufferSize := BufferSize;
+end;
 
 constructor TRS.Create;
 begin
@@ -39,34 +52,34 @@ end;
 
 procedure TRS.Initialize;
 begin
-  Fm_hash := 0;
-  Fm_a := 63689;
+  FHash := 0;
+  FA := 63689;
 end;
 
-procedure TRS.TransformBytes(a_data: THashLibByteArray;
-  a_index, a_length: Int32);
+procedure TRS.TransformBytes(const AData: THashLibByteArray;
+  AIndex, ALength: Int32);
 var
-  i: Int32;
+  LIdx: Int32;
 begin
 {$IFDEF DEBUG}
-  System.Assert(a_index >= 0);
-  System.Assert(a_length >= 0);
-  System.Assert(a_index + a_length <= System.Length(a_data));
+  System.Assert(AIndex >= 0);
+  System.Assert(ALength >= 0);
+  System.Assert(AIndex + ALength <= System.Length(AData));
 {$ENDIF DEBUG}
-  i := a_index;
-  while a_length > 0 do
+  LIdx := AIndex;
+  while ALength > 0 do
   begin
-    Fm_hash := (Fm_hash * Fm_a) + a_data[i];
-    Fm_a := Fm_a * B;
-    System.Inc(i);
-    System.Dec(a_length);
+    FHash := (FHash * FA) + AData[LIdx];
+    FA := FA * B;
+    System.Inc(LIdx);
+    System.Dec(ALength);
   end;
 
 end;
 
 function TRS.TransformFinal: IHashResult;
 begin
-  result := THashResult.Create(Fm_hash);
+  result := THashResult.Create(FHash);
   Initialize();
 end;
 

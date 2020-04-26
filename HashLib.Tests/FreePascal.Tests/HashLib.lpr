@@ -6,12 +6,19 @@ uses
   Interfaces,
   Forms,
   GuiTestRunner,
- // fpcunittestrunner,
-  HashLibTests,
+  HashLibTestBase,
+  TestVectors,
+  ChecksumTests,
+  NullDigestTests,
+  Hash32Tests,
+  Hash64Tests,
+  Hash128Tests,
+  CryptoTests,
   BitConverterTests,
   PBKDF2_HMACTests,
-  Blake2BTestVectors,
-  Blake2STestVectors;
+  PBKDF_Argon2Tests,
+  PBKDF_ScryptTests,
+  CRCTests;
 
 {$R *.res}
 

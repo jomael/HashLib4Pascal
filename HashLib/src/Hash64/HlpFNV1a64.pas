@@ -7,62 +7,73 @@ interface
 uses
   HlpHashLibTypes,
   HlpHash,
+  HlpIHash,
   HlpIHashInfo,
   HlpHashResult,
   HlpIHashResult;
 
 type
-  TFNV1a64 = class sealed(THash, IHash64, IBlockHash, ITransformBlock)
+  TFNV1a64 = class sealed(THash, IHash64, ITransformBlock)
   strict private
-
-    Fm_hash: UInt64;
+  var
+    FHash: UInt64;
 
   public
     constructor Create();
     procedure Initialize(); override;
-    procedure TransformBytes(a_data: THashLibByteArray;
-      a_index, a_length: Int32); override;
+    procedure TransformBytes(const AData: THashLibByteArray;
+      AIndex, ALength: Int32); override;
     function TransformFinal(): IHashResult; override;
+    function Clone(): IHash; override;
   end;
 
 implementation
 
 { TFNV1a64 }
 
+function TFNV1a64.Clone(): IHash;
+var
+  LHashInstance: TFNV1a64;
+begin
+  LHashInstance := TFNV1a64.Create();
+  LHashInstance.FHash := FHash;
+  result := LHashInstance as IHash;
+  result.BufferSize := BufferSize;
+end;
+
 constructor TFNV1a64.Create;
 begin
   Inherited Create(8, 1);
-
 end;
 
 procedure TFNV1a64.Initialize;
 begin
-  Fm_hash := 14695981039346656037;
+  FHash := 14695981039346656037;
 end;
 
-procedure TFNV1a64.TransformBytes(a_data: THashLibByteArray;
-  a_index, a_length: Int32);
+procedure TFNV1a64.TransformBytes(const AData: THashLibByteArray;
+  AIndex, ALength: Int32);
 var
-  i: Int32;
+  LIdx: Int32;
 begin
 {$IFDEF DEBUG}
-  System.Assert(a_index >= 0);
-  System.Assert(a_length >= 0);
-  System.Assert(a_index + a_length <= System.Length(a_data));
+  System.Assert(AIndex >= 0);
+  System.Assert(ALength >= 0);
+  System.Assert(AIndex + ALength <= System.Length(AData));
 {$ENDIF DEBUG}
-  i := a_index;
-  while a_length > 0 do
+  LIdx := AIndex;
+  while ALength > 0 do
   begin
-    Fm_hash := (Fm_hash xor a_data[i]) * 1099511628211;
-    System.Inc(i);
-    System.Dec(a_length);
+    FHash := (FHash xor AData[LIdx]) * UInt64(1099511628211);
+    System.Inc(LIdx);
+    System.Dec(ALength);
   end;
 
 end;
 
 function TFNV1a64.TransformFinal: IHashResult;
 begin
-  result := THashResult.Create(Fm_hash);
+  result := THashResult.Create(FHash);
   Initialize();
 end;
 

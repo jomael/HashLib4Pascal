@@ -6,7 +6,11 @@ interface
 
 uses
   HlpHashLibTypes,
+{$IFDEF DELPHI}
+  HlpHash,
+{$ENDIF DELPHI}
   HlpBits,
+  HlpIHash,
   HlpIHashInfo,
   HlpHashResult,
   HlpIHashResult,
@@ -15,12 +19,16 @@ uses
 type
 
   TJenkins3 = class sealed(TMultipleTransformNonBlock, IHash32, ITransformBlock)
+  strict private
+  var
+    FInitialValue: Int32;
 
   strict protected
-    function ComputeAggregatedBytes(a_data: THashLibByteArray)
+    function ComputeAggregatedBytes(const AData: THashLibByteArray)
       : IHashResult; override;
   public
-    constructor Create();
+    constructor Create(AInitialValue: Int32 = 0);
+    function Clone(): IHash; override;
 
   end;
 
@@ -28,368 +36,368 @@ implementation
 
 { TJenkins3 }
 
-constructor TJenkins3.Create;
+constructor TJenkins3.Create(AInitialValue: Int32);
 begin
   Inherited Create(4, 12);
+  FInitialValue := AInitialValue;
 end;
 
-function TJenkins3.ComputeAggregatedBytes(a_data: THashLibByteArray)
+function TJenkins3.Clone(): IHash;
+var
+  LHashInstance: TJenkins3;
+begin
+  LHashInstance := TJenkins3.Create();
+  FBuffer.Position := 0;
+  LHashInstance.FInitialValue := FInitialValue;
+  LHashInstance.FBuffer.CopyFrom(FBuffer, FBuffer.Size);
+  result := LHashInstance as IHash;
+  result.BufferSize := BufferSize;
+end;
+
+function TJenkins3.ComputeAggregatedBytes(const AData: THashLibByteArray)
   : IHashResult;
 var
-  &length, currentIndex, i1, i2, i3, i4: Int32;
-  a, b, c: UInt32;
+  LLength, LCurrentIndex, I1, I2, I3, I4: Int32;
+  LA, LB, LC: UInt32;
 begin
-  length := System.length(a_data);
-  if (length = 0) then
+  LLength := System.length(AData);
+  LA := UInt32($DEADBEEF) + UInt32(LLength) + UInt32(FInitialValue);
+  LB := LA;
+  LC := LB;
+  if (LLength = 0) then
   begin
-    result := THashResult.Create(UInt32(0));
+    result := THashResult.Create(LC);
     Exit;
   end;
-  a := $DEADBEEF + UInt32(length);
-  b := a;
-  c := b;
-  currentIndex := 0;
-  while (length > 12) do
+
+  LCurrentIndex := 0;
+  while (LLength > 12) do
   begin
+    I1 := AData[LCurrentIndex];
+    System.Inc(LCurrentIndex);
+    I2 := AData[LCurrentIndex] shl 8;
+    System.Inc(LCurrentIndex);
+    I3 := AData[LCurrentIndex] shl 16;
+    System.Inc(LCurrentIndex);
+    I4 := AData[LCurrentIndex] shl 24;
+    System.Inc(LCurrentIndex);
 
-    i1 := a_data[currentIndex];
-    System.Inc(currentIndex);
-    i2 := a_data[currentIndex] shl 8;
-    System.Inc(currentIndex);
-    i3 := a_data[currentIndex] shl 16;
-    System.Inc(currentIndex);
-    i4 := a_data[currentIndex] shl 24;
-    System.Inc(currentIndex);
+    LA := LA + UInt32(I1 or I2 or I3 or I4);
 
-    a := a + UInt32(i1 or i2 or i3 or i4);
+    I1 := AData[LCurrentIndex];
+    System.Inc(LCurrentIndex);
+    I2 := AData[LCurrentIndex] shl 8;
+    System.Inc(LCurrentIndex);
+    I3 := AData[LCurrentIndex] shl 16;
+    System.Inc(LCurrentIndex);
+    I4 := AData[LCurrentIndex] shl 24;
+    System.Inc(LCurrentIndex);
 
-    i1 := a_data[currentIndex];
-    System.Inc(currentIndex);
-    i2 := a_data[currentIndex] shl 8;
-    System.Inc(currentIndex);
-    i3 := a_data[currentIndex] shl 16;
-    System.Inc(currentIndex);
-    i4 := a_data[currentIndex] shl 24;
-    System.Inc(currentIndex);
+    LB := LB + UInt32(I1 or I2 or I3 or I4);
 
-    b := b + UInt32(i1 or i2 or i3 or i4);
+    I1 := AData[LCurrentIndex];
+    System.Inc(LCurrentIndex);
+    I2 := AData[LCurrentIndex] shl 8;
+    System.Inc(LCurrentIndex);
+    I3 := AData[LCurrentIndex] shl 16;
+    System.Inc(LCurrentIndex);
+    I4 := AData[LCurrentIndex] shl 24;
+    System.Inc(LCurrentIndex);
 
-    i1 := a_data[currentIndex];
-    System.Inc(currentIndex);
-    i2 := a_data[currentIndex] shl 8;
-    System.Inc(currentIndex);
-    i3 := a_data[currentIndex] shl 16;
-    System.Inc(currentIndex);
-    i4 := a_data[currentIndex] shl 24;
-    System.Inc(currentIndex);
+    LC := LC + UInt32(I1 or I2 or I3 or I4);
 
-    c := c + UInt32(i1 or i2 or i3 or i4);
+    LA := LA - LC;
+    LA := LA xor TBits.RotateLeft32(LC, 4);
+    LC := LC + LB;
+    LB := LB - LA;
+    LB := LB xor TBits.RotateLeft32(LA, 6);
+    LA := LA + LC;
+    LC := LC - LB;
+    LC := LC xor TBits.RotateLeft32(LB, 8);
+    LB := LB + LA;
+    LA := LA - LC;
+    LA := LA xor TBits.RotateLeft32(LC, 16);
+    LC := LC + LB;
+    LB := LB - LA;
+    LB := LB xor TBits.RotateLeft32(LA, 19);
+    LA := LA + LC;
+    LC := LC - LB;
+    LC := LC xor TBits.RotateLeft32(LB, 4);
+    LB := LB + LA;
 
-    a := a - c;
-    a := a xor TBits.RotateLeft32(c, 4);
-    c := c + b;
-    b := b - a;
-    b := b xor TBits.RotateLeft32(a, 6);
-    a := a + c;
-    c := c - b;
-    c := c xor TBits.RotateLeft32(b, 8);
-    b := b + a;
-    a := a - c;
-    a := a xor TBits.RotateLeft32(c, 16);
-    c := c + b;
-    b := b - a;
-    b := b xor TBits.RotateLeft32(a, 19);
-    a := a + c;
-    c := c - b;
-    c := c xor TBits.RotateLeft32(b, 4);
-    b := b + a;
-
-    System.Dec(length, 12);
+    System.Dec(LLength, 12);
   end;
 
-  case length of
+  case LLength of
     12:
       begin
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
-        System.Inc(currentIndex);
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
+        System.Inc(LCurrentIndex);
 
-        a := a + UInt32(i1 or i2 or i3 or i4);
+        LA := LA + UInt32(I1 or I2 or I3 or I4);
 
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
-        System.Inc(currentIndex);
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
+        System.Inc(LCurrentIndex);
 
-        b := b + UInt32(i1 or i2 or i3 or i4);
+        LB := LB + UInt32(I1 or I2 or I3 or I4);
 
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
 
-        c := c + UInt32(i1 or i2 or i3 or i4);
+        LC := LC + UInt32(I1 or I2 or I3 or I4);
       end;
 
     11:
       begin
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
-        System.Inc(currentIndex);
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
+        System.Inc(LCurrentIndex);
 
-        a := a + UInt32(i1 or i2 or i3 or i4);
+        LA := LA + UInt32(I1 or I2 or I3 or I4);
 
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
-        System.Inc(currentIndex);
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
+        System.Inc(LCurrentIndex);
 
-        b := b + UInt32(i1 or i2 or i3 or i4);
+        LB := LB + UInt32(I1 or I2 or I3 or I4);
 
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
 
-        c := c + UInt32(i1 or i2 or i3);
-
+        LC := LC + UInt32(I1 or I2 or I3);
       end;
 
     10:
       begin
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
-        System.Inc(currentIndex);
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
+        System.Inc(LCurrentIndex);
 
-        a := a + UInt32(i1 or i2 or i3 or i4);
+        LA := LA + UInt32(I1 or I2 or I3 or I4);
 
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
-        System.Inc(currentIndex);
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
+        System.Inc(LCurrentIndex);
 
-        b := b + UInt32(i1 or i2 or i3 or i4);
+        LB := LB + UInt32(I1 or I2 or I3 or I4);
 
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
 
-        c := c + UInt32(i1 or i2);
-
+        LC := LC + UInt32(I1 or I2);
       end;
 
     9:
       begin
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
-        System.Inc(currentIndex);
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
+        System.Inc(LCurrentIndex);
 
-        a := a + UInt32(i1 or i2 or i3 or i4);
+        LA := LA + UInt32(I1 or I2 or I3 or I4);
 
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
-        System.Inc(currentIndex);
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
+        System.Inc(LCurrentIndex);
 
-        b := b + UInt32(i1 or i2 or i3 or i4);
+        LB := LB + UInt32(I1 or I2 or I3 or I4);
 
-        i1 := a_data[currentIndex];
+        I1 := AData[LCurrentIndex];
 
-        c := c + UInt32(i1);
-
+        LC := LC + UInt32(I1);
       end;
 
     8:
       begin
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
-        System.Inc(currentIndex);
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
+        System.Inc(LCurrentIndex);
 
-        a := a + UInt32(i1 or i2 or i3 or i4);
+        LA := LA + UInt32(I1 or I2 or I3 or I4);
 
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
 
-        b := b + UInt32(i1 or i2 or i3 or i4);
-
+        LB := LB + UInt32(I1 or I2 or I3 or I4);
       end;
 
     7:
       begin
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
-        System.Inc(currentIndex);
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
+        System.Inc(LCurrentIndex);
 
-        a := a + UInt32(i1 or i2 or i3 or i4);
+        LA := LA + UInt32(I1 or I2 or I3 or I4);
 
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
 
-        b := b + UInt32(i1 or i2 or i3);
-
+        LB := LB + UInt32(I1 or I2 or I3);
       end;
 
     6:
       begin
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
-        System.Inc(currentIndex);
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
+        System.Inc(LCurrentIndex);
 
-        a := a + UInt32(i1 or i2 or i3 or i4);
+        LA := LA + UInt32(I1 or I2 or I3 or I4);
 
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
 
-        b := b + UInt32(i1 or i2);
-
+        LB := LB + UInt32(I1 or I2);
       end;
 
     5:
       begin
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
-        System.Inc(currentIndex);
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
+        System.Inc(LCurrentIndex);
 
-        a := a + UInt32(i1 or i2 or i3 or i4);
+        LA := LA + UInt32(I1 or I2 or I3 or I4);
 
-        i1 := a_data[currentIndex];
+        I1 := AData[LCurrentIndex];
 
-        b := b + UInt32(i1);
-
+        LB := LB + UInt32(I1);
       end;
 
     4:
       begin
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
-        System.Inc(currentIndex);
-        i4 := a_data[currentIndex] shl 24;
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
+        System.Inc(LCurrentIndex);
+        I4 := AData[LCurrentIndex] shl 24;
 
-        a := a + UInt32(i1 or i2 or i3 or i4);
-
+        LA := LA + UInt32(I1 or I2 or I3 or I4);
       end;
 
     3:
       begin
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
-        System.Inc(currentIndex);
-        i3 := a_data[currentIndex] shl 16;
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
+        System.Inc(LCurrentIndex);
+        I3 := AData[LCurrentIndex] shl 16;
 
-        a := a + UInt32(i1 or i2 or i3);
-
+        LA := LA + UInt32(I1 or I2 or I3);
       end;
 
     2:
       begin
-        i1 := a_data[currentIndex];
-        System.Inc(currentIndex);
-        i2 := a_data[currentIndex] shl 8;
+        I1 := AData[LCurrentIndex];
+        System.Inc(LCurrentIndex);
+        I2 := AData[LCurrentIndex] shl 8;
 
-        a := a + UInt32(i1 or i2);
-
+        LA := LA + UInt32(I1 or I2);
       end;
 
     1:
       begin
-        i1 := a_data[currentIndex];
+        I1 := AData[LCurrentIndex];
 
-        a := a + UInt32(i1);
-
+        LA := LA + UInt32(I1);
       end;
-
   end;
 
-  c := c xor b;
-  c := c - TBits.RotateLeft32(b, 14);
-  a := a xor c;
-  a := a - TBits.RotateLeft32(c, 11);
-  b := b xor a;
-  b := b - TBits.RotateLeft32(a, 25);
-  c := c xor b;
-  c := c - TBits.RotateLeft32(b, 16);
-  a := a xor c;
-  a := a - TBits.RotateLeft32(c, 4);
-  b := b xor a;
-  b := b - TBits.RotateLeft32(a, 14);
-  c := c xor b;
-  c := c - TBits.RotateLeft32(b, 24);
+  LC := LC xor LB;
+  LC := LC - TBits.RotateLeft32(LB, 14);
+  LA := LA xor LC;
+  LA := LA - TBits.RotateLeft32(LC, 11);
+  LB := LB xor LA;
+  LB := LB - TBits.RotateLeft32(LA, 25);
+  LC := LC xor LB;
+  LC := LC - TBits.RotateLeft32(LB, 16);
+  LA := LA xor LC;
+  LA := LA - TBits.RotateLeft32(LC, 4);
+  LB := LB xor LA;
+  LB := LB - TBits.RotateLeft32(LA, 14);
+  LC := LC xor LB;
+  LC := LC - TBits.RotateLeft32(LB, 24);
 
-  result := THashResult.Create(c);
-
+  result := THashResult.Create(LC);
 end;
 
 end.

@@ -20,20 +20,18 @@ uses
   HlpHash in '..\..\HashLib\src\Base\HlpHash.pas',
   HlpKDF in '..\..\HashLib\src\Base\HlpKDF.pas',
   HlpHashBuffer in '..\..\HashLib\src\Base\HlpHashBuffer.pas',
-  HlpHashCryptoNotBuildIn
-    in '..\..\HashLib\src\Base\HlpHashCryptoNotBuildIn.pas',
+  HlpHashCryptoNotBuildIn in '..\..\HashLib\src\Base\HlpHashCryptoNotBuildIn.pas',
   HlpHashFactory in '..\..\HashLib\src\Base\HlpHashFactory.pas',
   HlpHashResult in '..\..\HashLib\src\Base\HlpHashResult.pas',
   HlpHashRounds in '..\..\HashLib\src\Base\HlpHashRounds.pas',
   HlpHashSize in '..\..\HashLib\src\Base\HlpHashSize.pas',
-  HlpHMACNotBuildInAdapter
-    in '..\..\HashLib\src\Base\HlpHMACNotBuildInAdapter.pas',
-  HlpMultipleTransformNonBlock
-    in '..\..\HashLib\src\Base\HlpMultipleTransformNonBlock.pas',
+  HlpHMACNotBuildInAdapter in '..\..\HashLib\src\Base\HlpHMACNotBuildInAdapter.pas',
+  HlpMultipleTransformNonBlock in '..\..\HashLib\src\Base\HlpMultipleTransformNonBlock.pas',
   HlpAdler32 in '..\..\HashLib\src\Checksum\HlpAdler32.pas',
   HlpCRC in '..\..\HashLib\src\Checksum\HlpCRC.pas',
   HlpCRC16 in '..\..\HashLib\src\Checksum\HlpCRC16.pas',
   HlpCRC32 in '..\..\HashLib\src\Checksum\HlpCRC32.pas',
+  HlpCRC32Fast in '..\..\HashLib\src\Checksum\HlpCRC32Fast.pas',
   HlpCRC64 in '..\..\HashLib\src\Checksum\HlpCRC64.pas',
   HlpGost in '..\..\HashLib\src\Crypto\HlpGost.pas',
   HlpGrindahl256 in '..\..\HashLib\src\Crypto\HlpGrindahl256.pas',
@@ -67,20 +65,11 @@ uses
   HlpTiger in '..\..\HashLib\src\Crypto\HlpTiger.pas',
   HlpTiger2 in '..\..\HashLib\src\Crypto\HlpTiger2.pas',
   HlpWhirlPool in '..\..\HashLib\src\Crypto\HlpWhirlPool.pas',
+  HlpGOST3411_2012 in '..\..\HashLib\src\Crypto\HlpGOST3411_2012.pas',
   HlpBlake2B in '..\..\HashLib\src\Crypto\HlpBlake2B.pas',
   HlpBlake2S in '..\..\HashLib\src\Crypto\HlpBlake2S.pas',
-  HlpBlake2BConfig
-    in '..\..\HashLib\src\Crypto\Blake2BConfigurations\HlpBlake2BConfig.pas',
-  HlpBlake2BIvBuilder
-    in '..\..\HashLib\src\Crypto\Blake2BConfigurations\HlpBlake2BIvBuilder.pas',
-  HlpBlake2BTreeConfig
-    in '..\..\HashLib\src\Crypto\Blake2BConfigurations\HlpBlake2BTreeConfig.pas',
-  HlpBlake2SConfig
-    in '..\..\HashLib\src\Crypto\Blake2SConfigurations\HlpBlake2SConfig.pas',
-  HlpBlake2SIvBuilder
-    in '..\..\HashLib\src\Crypto\Blake2SConfigurations\HlpBlake2SIvBuilder.pas',
-  HlpBlake2STreeConfig
-    in '..\..\HashLib\src\Crypto\Blake2SConfigurations\HlpBlake2STreeConfig.pas',
+  HlpBlake2BParams in '..\..\HashLib\src\Crypto\Blake2BParams\HlpBlake2BParams.pas',
+  HlpBlake2SParams in '..\..\HashLib\src\Crypto\Blake2SParams\HlpBlake2SParams.pas',
   HlpNullDigest in '..\..\HashLib\src\NullDigest\HlpNullDigest.pas',
   HlpAP in '..\..\HashLib\src\Hash32\HlpAP.pas',
   HlpBernstein in '..\..\HashLib\src\Hash32\HlpBernstein.pas',
@@ -108,36 +97,42 @@ uses
   HlpMurmur2_64 in '..\..\HashLib\src\Hash64\HlpMurmur2_64.pas',
   HlpSipHash in '..\..\HashLib\src\Hash64\HlpSipHash.pas',
   HlpXXHash64 in '..\..\HashLib\src\Hash64\HlpXXHash64.pas',
-  HlpMurmurHash3_x86_128
-    in '..\..\HashLib\src\Hash128\HlpMurmurHash3_x86_128.pas',
-  HlpMurmurHash3_x64_128
-    in '..\..\HashLib\src\Hash128\HlpMurmurHash3_x64_128.pas',
+  HlpMurmurHash3_x86_128 in '..\..\HashLib\src\Hash128\HlpMurmurHash3_x86_128.pas',
+  HlpMurmurHash3_x64_128 in '..\..\HashLib\src\Hash128\HlpMurmurHash3_x64_128.pas',
+  HlpSipHash128 in '..\..\HashLib\src\Hash128\HlpSipHash128.pas',
   HlpIHash in '..\..\HashLib\src\Interfaces\HlpIHash.pas',
   HlpIKDF in '..\..\HashLib\src\Interfaces\HlpIKDF.pas',
   HlpICRC in '..\..\HashLib\src\Interfaces\HlpICRC.pas',
   HlpIHashInfo in '..\..\HashLib\src\Interfaces\HlpIHashInfo.pas',
   HlpIHashResult in '..\..\HashLib\src\Interfaces\HlpIHashResult.pas',
-  HlpIBlake2BConfig
-    in '..\..\HashLib\src\Interfaces\IBlake2BConfigurations\HlpIBlake2BConfig.pas',
-  HlpIBlake2SConfig
-    in '..\..\HashLib\src\Interfaces\IBlake2SConfigurations\HlpIBlake2SConfig.pas',
-  HlpIBlake2STreeConfig
-    in '..\..\HashLib\src\Interfaces\IBlake2SConfigurations\HlpIBlake2STreeConfig.pas',
-  HlpIBlake2BTreeConfig
-    in '..\..\HashLib\src\Interfaces\IBlake2BConfigurations\HlpIBlake2BTreeConfig.pas',
-  HlpPBKDF2_HMACNotBuildInAdapter
-    in '..\..\HashLib\src\KDF\HlpPBKDF2_HMACNotBuildInAdapter.pas',
+  HlpIBlake2BParams in '..\..\HashLib\src\Interfaces\IBlake2BParams\HlpIBlake2BParams.pas',
+  HlpIBlake2SParams in '..\..\HashLib\src\Interfaces\IBlake2SParams\HlpIBlake2SParams.pas',
+  HlpBlake2BP in '..\..\HashLib\src\Crypto\HlpBlake2BP.pas',
+  HlpBlake2SP in '..\..\HashLib\src\Crypto\HlpBlake2SP.pas',
+  HlpBlake3 in '..\..\HashLib\src\Crypto\HlpBlake3.pas',
+  HlpPBKDF2_HMACNotBuildInAdapter in '..\..\HashLib\src\KDF\HlpPBKDF2_HMACNotBuildInAdapter.pas',
+  HlpPBKDF_Argon2NotBuildInAdapter in '..\..\HashLib\src\KDF\HlpPBKDF_Argon2NotBuildInAdapter.pas',
+  HlpArgon2TypeAndVersion in '..\..\HashLib\src\KDF\HlpArgon2TypeAndVersion.pas',
+  HlpPBKDF_ScryptNotBuildInAdapter in '..\..\HashLib\src\KDF\HlpPBKDF_ScryptNotBuildInAdapter.pas',
   HlpNullable in '..\..\HashLib\src\Nullable\HlpNullable.pas',
   HlpConverters in '..\..\HashLib\src\Utils\HlpConverters.pas',
   HlpBitConverter in '..\..\HashLib\src\Utils\HlpBitConverter.pas',
   HlpBits in '..\..\HashLib\src\Utils\HlpBits.pas',
   HlpHashLibTypes in '..\..\HashLib\src\Utils\HlpHashLibTypes.pas',
-  HashLibTests in '..\src\HashLibTests.pas',
+  HlpArrayUtils in '..\..\HashLib\src\Utils\HlpArrayUtils.pas',
+  HashLibTestBase in '..\src\HashLibTestBase.pas',
+  TestVectors in '..\src\TestVectors.pas',
+  ChecksumTests in '..\src\ChecksumTests.pas',
+  NullDigestTests in '..\src\NullDigestTests.pas',
+  Hash32Tests in '..\src\Hash32Tests.pas',
+  Hash64Tests in '..\src\Hash64Tests.pas',
+  Hash128Tests in '..\src\Hash128Tests.pas',
+  CryptoTests in '..\src\CryptoTests.pas',
   BitConverterTests in '..\src\BitConverterTests.pas',
   PBKDF2_HMACTests in '..\src\PBKDF2_HMACTests.pas',
-  Blake2BTestVectors in '..\src\Blake2BTestVectors.pas',
-  Blake2STestVectors in '..\src\Blake2STestVectors.pas';
-
+  PBKDF_Argon2Tests in '..\src\PBKDF_Argon2Tests.pas',
+  PBKDF_ScryptTests in '..\src\PBKDF_ScryptTests.pas',
+  CRCTests in '..\src\CRCTests.pas';
 begin
 
   TestInsight.DUnit.RunRegisteredTests;

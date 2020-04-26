@@ -5,17 +5,7 @@ unit HlpMultipleTransformNonBlock;
 interface
 
 uses
-{$IFDEF DELPHI}
-{$IFDEF HAS_UNITSCOPE}
-  System.Generics.Collections,
-{$ELSE}
-  Generics.Collections,
-{$ENDIF HAS_UNITSCOPE}
-{$ELSE}
-{$IFDEF FPC}
-  fgl,
-{$ENDIF FPC}
-{$ENDIF DELPHI}
+  Classes,
   HlpHashLibTypes,
   HlpHash,
   HlpIHashInfo,
@@ -27,23 +17,24 @@ type
 
   strict private
 
-    Fm_list: {$IFDEF DELPHI} TList<THashLibByteArray>
-{$ELSE} TFPGList<THashLibByteArray> {$ENDIF DELPHI};
-
     function Aggregate(): THashLibByteArray;
 
   strict protected
-    function ComputeAggregatedBytes(a_data: THashLibByteArray): IHashResult;
-      virtual; abstract;
+  var
+    FBuffer: TMemoryStream;
+
+    function ComputeAggregatedBytes(const AData: THashLibByteArray)
+      : IHashResult; virtual; abstract;
 
   public
-    constructor Create(a_hash_size, a_block_size: Int32);
+    constructor Create(AHashSize, ABlockSize: Int32);
     destructor Destroy; override;
     procedure Initialize(); override;
-    procedure TransformBytes(a_data: THashLibByteArray;
-      a_index, a_length: Int32); override;
+    procedure TransformBytes(const AData: THashLibByteArray;
+      AIndex, ALength: Int32); override;
     function TransformFinal(): IHashResult; override;
-    function ComputeBytes(a_data: THashLibByteArray): IHashResult; override;
+    function ComputeBytes(const AData: THashLibByteArray): IHashResult;
+      override;
 
   end;
 
@@ -52,71 +43,56 @@ implementation
 { TMultipleTransformNonBlock }
 
 function TMultipleTransformNonBlock.Aggregate: THashLibByteArray;
-var
-  sum, index: Int32;
-  arr: THashLibByteArray;
 begin
-  sum := 0;
-  for arr in Fm_list do
+  Result := Nil;
+  if FBuffer.Size > 0 then
   begin
-    sum := sum + System.Length(arr);
+    FBuffer.Position := 0;
+    System.SetLength(Result, FBuffer.Size);
+    FBuffer.Read(Result[0], FBuffer.Size);
   end;
-
-  System.SetLength(result, sum);
-  index := 0;
-
-  for arr in Fm_list do
-
-  begin
-    System.Move(arr[0], result[index], System.Length(arr) *
-      System.SizeOf(Byte));
-    index := index + System.Length(arr);
-  end;
-
 end;
 
-constructor TMultipleTransformNonBlock.Create(a_hash_size, a_block_size: Int32);
+constructor TMultipleTransformNonBlock.Create(AHashSize, ABlockSize: Int32);
 begin
-  Inherited Create(a_hash_size, a_block_size);
-  Fm_list := {$IFDEF DELPHI} TList<THashLibByteArray>
-{$ELSE} TFPGList<THashLibByteArray> {$ENDIF DELPHI}.Create();
+  Inherited Create(AHashSize, ABlockSize);
+  FBuffer := TMemoryStream.Create();
 end;
 
 destructor TMultipleTransformNonBlock.Destroy;
 begin
-  Fm_list.Free;
+  FBuffer.Free;
   inherited Destroy;
 end;
 
 procedure TMultipleTransformNonBlock.Initialize;
 begin
-  Fm_list.Clear;
+  FBuffer.Clear;
+  FBuffer.SetSize(Int64(0));
 end;
 
-procedure TMultipleTransformNonBlock.TransformBytes(a_data: THashLibByteArray;
-  a_index, a_length: Int32);
-
+procedure TMultipleTransformNonBlock.TransformBytes
+  (const AData: THashLibByteArray; AIndex, ALength: Int32);
 begin
 {$IFDEF DEBUG}
-  System.Assert(a_index >= 0);
-  System.Assert(a_length >= 0);
-  System.Assert(a_index + a_length <= System.Length(a_data));
+  System.Assert(AIndex >= 0);
+  System.Assert(ALength >= 0);
+  System.Assert(AIndex + ALength <= System.Length(AData));
 {$ENDIF DEBUG}
-  Fm_list.Add(System.Copy(a_data, a_index, a_length));
-
+  FBuffer.Write(AData[AIndex], ALength);
 end;
 
 function TMultipleTransformNonBlock.TransformFinal: IHashResult;
 begin
-  result := ComputeAggregatedBytes(Aggregate());
+  Result := ComputeAggregatedBytes(Aggregate());
   Initialize();
 end;
 
-function TMultipleTransformNonBlock.ComputeBytes(a_data: THashLibByteArray)
+function TMultipleTransformNonBlock.ComputeBytes(const AData: THashLibByteArray)
   : IHashResult;
 begin
   Initialize();
-  result := ComputeAggregatedBytes(a_data);
+  Result := ComputeAggregatedBytes(AData);
 end;
 
 end.
